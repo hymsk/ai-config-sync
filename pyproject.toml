@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-config-sync"
+version = "0.1.0"
+description = "Multi-server configuration synchronization agent backed by a dedicated Git repository"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.scripts]
+ai-config-sync = "ai_config_sync.cli:main"
+
+[tool.setuptools]
+packages = ["ai_config_sync"]
