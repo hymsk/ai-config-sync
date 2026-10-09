@@ -16,25 +16,25 @@ class ParseTest(unittest.TestCase):
 
     def test_negation_and_order(self):
         rules = sync_list.parse("/a/**\n!/a/x.tmp\n")
-        self.assertTrue(sync_list._match(rules, "/a/y"))
-        self.assertFalse(sync_list._match(rules, "/a/x.tmp"))
-        self.assertFalse(sync_list._match(rules, "/b/y"))
+        self.assertTrue(sync_list.match_path(rules, "/a/y"))
+        self.assertFalse(sync_list.match_path(rules, "/a/x.tmp"))
+        self.assertFalse(sync_list.match_path(rules, "/b/y"))
 
     def test_reinclude_wins_when_later(self):
         rules = sync_list.parse("/a/**\n!/a/*.tmp\n/a/keep.tmp\n")
-        self.assertTrue(sync_list._match(rules, "/a/keep.tmp"))
-        self.assertFalse(sync_list._match(rules, "/a/other.tmp"))
+        self.assertTrue(sync_list.match_path(rules, "/a/keep.tmp"))
+        self.assertFalse(sync_list.match_path(rules, "/a/other.tmp"))
 
     def test_literal_dir_subtree(self):
         rules = sync_list.parse("/a/b\n")
-        self.assertTrue(sync_list._match(rules, "/a/b/c/d"))
-        self.assertFalse(sync_list._match(rules, "/a/bx"))
+        self.assertTrue(sync_list.match_path(rules, "/a/b/c/d"))
+        self.assertFalse(sync_list.match_path(rules, "/a/bx"))
 
     def test_double_star_middle(self):
         rules = sync_list.parse("/a/**/x.md\n")
-        self.assertTrue(sync_list._match(rules, "/a/x.md"))
-        self.assertTrue(sync_list._match(rules, "/a/p/q/x.md"))
-        self.assertFalse(sync_list._match(rules, "/a/p/y.md"))
+        self.assertTrue(sync_list.match_path(rules, "/a/x.md"))
+        self.assertTrue(sync_list.match_path(rules, "/a/p/q/x.md"))
+        self.assertFalse(sync_list.match_path(rules, "/a/p/y.md"))
 
 
 class ExpandTest(unittest.TestCase):

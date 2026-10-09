@@ -116,6 +116,7 @@ def save_bootstrap(layout: Layout, boot: Bootstrap):
 class RepoConfig:
     interval: float = 5.0
     remote_check_interval: float = 5.0
+    max_backups_per_file: int = 20
     git_name: str = "sync-bot"
     git_email: str = "sync-bot@invalid"
 
@@ -136,10 +137,14 @@ def parse_repo_config(text: str) -> RepoConfig:
             cfg.remote_check_interval = float(data["remote_check_interval"])
         else:
             cfg.remote_check_interval = cfg.interval
+        if "max_backups_per_file" in data:
+            cfg.max_backups_per_file = int(data["max_backups_per_file"])
     except (TypeError, ValueError):
         raise ConfigError("config.toml: interval 必须为数值")
     cfg.git_name = str(git.get("name", cfg.git_name))
     cfg.git_email = str(git.get("email", cfg.git_email))
     if cfg.interval <= 0 or cfg.remote_check_interval <= 0:
         raise ConfigError("config.toml: interval 必须为正数")
+    if cfg.max_backups_per_file < 0:
+        raise ConfigError("config.toml: max_backups_per_file 不得为负（0=不清理）")
     return cfg

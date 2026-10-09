@@ -119,6 +119,8 @@ def prefer_repo(agent: Agent):
                 continue
         applier.validate(host, blob)
         applier.backup(host, agent.layout.backups_dir, "adopt-repo", repo_path)
+        applier.prune_backups(agent.layout.backups_dir, repo_path,
+                              cfg.max_backups_per_file)
         applier.atomic_write(host, blob)
         applied += 1
     agent.log("prefer-repo 写回 {} 个文件".format(applied))
@@ -173,5 +175,11 @@ def prefer_merge(agent: Agent):
         agent._flag("首轮 merge 采用冲突；解决后删除标记")
         return ("paused-conflict",
                 "add/add 冲突待人工解决（ours=仓库版 theirs=本机版）")
-    gitops.push(agent.wt, agent.branch)
+    try:
+        gitops.push(agent.wt, agent.branch)
+    except gitops.GitError as exc:
+        if gitops.is_auth_error(exc.stderr):
+            return ("error-auth", "推送认证失败: {}".format(exc))
+        # 合并提交已在本地 HEAD，未推送部分交由下一轮正常事务重试推送
+        return ("error-transient", "推送失败（下一轮重试）: {}".format(exc))
     return agent.run_once()

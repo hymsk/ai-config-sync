@@ -119,7 +119,7 @@ class Agent:
                 continue
             if os.path.exists(host_path):
                 continue  # 本机存在但被展开排除（如软链接）→ 只合并不写回
-            if sync_list._match(rules, host_path) and not sync_list._in_zones(
+            if sync_list.match_path(rules, host_path) and not sync_list.in_zones(
                     host_path, zones):
                 managed.files[host_path] = repo_path
         return cfg, rules, managed
@@ -346,6 +346,8 @@ class Agent:
                 skipped.append(str(exc))
                 continue
             applier.backup(host, self.layout.backups_dir, run_id, repo_path)
+            applier.prune_backups(self.layout.backups_dir, repo_path,
+                                  cfg.max_backups_per_file)
             applier.atomic_write(host, m_blob)
             applied.append(repo_path)
         self.journal.append("applied", run_id=run_id)
@@ -403,6 +405,8 @@ class Agent:
                 self.log(str(exc))
                 continue
             applier.backup(host, self.layout.backups_dir, run_id, repo_path)
+            applier.prune_backups(self.layout.backups_dir, repo_path,
+                                  cfg.max_backups_per_file)
             applier.atomic_write(host, head_blob)
             applied += 1
         self.journal.append("checkpointed", run_id=run_id, note="post-conflict")

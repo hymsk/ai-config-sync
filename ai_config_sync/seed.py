@@ -9,6 +9,8 @@ CONFIG_TOML = """\
 interval = 5
 # remote_check_interval: 无本机变化时的远端检查间隔（秒）
 remote_check_interval = 5
+# max_backups_per_file: 写回前每个文件保留的历史备份份数（0=不清理）
+max_backups_per_file = 20
 
 [git]
 name = "sync-bot"

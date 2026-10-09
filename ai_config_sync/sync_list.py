@@ -81,7 +81,7 @@ def parse(text: str):
     return rules
 
 
-def _match(rules, path: str) -> bool:
+def match_path(rules, path: str) -> bool:
     """后规则胜出：返回最后一条命中规则的纳入状态；无命中=不管理。"""
     included = None
     rel = path.lstrip("/")
@@ -113,7 +113,7 @@ def _under(path: str, prefix: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
-def _in_zones(path: str, hard_zones) -> bool:
+def in_zones(path: str, hard_zones) -> bool:
     return any(_under(path, str(z)) for z in hard_zones)
 
 
@@ -134,7 +134,7 @@ def _walk(prefix: str, hard_zones, warn):
             full = os.path.join(dirpath, d)
             if d == ".git":
                 continue
-            if _in_zones(full, hard_zones):
+            if in_zones(full, hard_zones):
                 warn("跳过硬排除目录: {}".format(full))
                 continue
             if any(_under(full, r) for r in FORBIDDEN_ROOTS):
@@ -192,7 +192,7 @@ def expand(rules, hard_zones, log=None):
                 continue
             candidates = _walk(prefix, hard_zones, warn)
         for cand in candidates:
-            if _in_zones(cand, hard_zones):
+            if in_zones(cand, hard_zones):
                 warn("跳过硬排除路径: {}".format(cand))
                 continue
             if any(_under(cand, r) for r in FORBIDDEN_ROOTS):
@@ -202,6 +202,6 @@ def expand(rules, hard_zones, log=None):
                 continue
             if not os.path.isfile(cand):
                 continue
-            if _match(rules, cand):
+            if match_path(rules, cand):
                 exp.add(cand)
     return exp

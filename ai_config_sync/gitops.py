@@ -215,8 +215,11 @@ def commit_tree(wt, tree, message, identity) -> str:
 
 
 def is_auth_error(stderr: str) -> bool:
+    # 注意不用裸 "permission denied"：本地文件系统权限错误也会出现该字样，
+    # 只有括注密钥类型的远端拒绝才视为认证失败。
     text = (stderr or "").lower()
     return any(k in text for k in (
-        "authentication", "permission denied", "403", "could not read username",
-        "publickey", "access denied", "http 401", "fatal: could not read",
+        "authentication", "permission denied (publickey", "403",
+        "could not read username", "publickey", "access denied",
+        "http 401", "fatal: could not read",
     ))

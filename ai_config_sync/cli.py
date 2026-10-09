@@ -3,6 +3,7 @@
 import argparse
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 
 from . import __version__, adopt, gitops, installer
 from .agent import Agent
@@ -14,8 +15,9 @@ def _setup_log(layout: Layout):
     logger = logging.getLogger("ai-config-sync")
     if not logger.handlers:
         logger.setLevel(logging.INFO)
-        logger.addHandler(logging.FileHandler(layout.log_path,
-                                               encoding="utf-8"))
+        logger.addHandler(RotatingFileHandler(
+            layout.log_path, maxBytes=1024 * 1024, backupCount=5,
+            encoding="utf-8"))
         logger.addHandler(logging.StreamHandler(sys.stderr))
     return logger
 
@@ -88,11 +90,17 @@ def main(argv=None):
             print("确认后执行: ai-config-sync once --prefer local|repo|merge")
             return 0
         if args.prefer == "local":
-            status, message = adopt.prefer_local(agent)
+            fn = adopt.prefer_local
         elif args.prefer == "repo":
-            status, message = adopt.prefer_repo(agent)
+            fn = adopt.prefer_repo
         else:
-            status, message = adopt.prefer_merge(agent)
+            fn = adopt.prefer_merge
+        try:
+            status, message = fn(agent)
+        except BlockingIOError:
+            print("另一实例正在运行（锁被占用）: {}".format(
+                agent.layout.lock_path), file=sys.stderr)
+            return 3
         print("{} {}".format(status, message))
         return 0 if status in ("ok", "idle") else 1
 
@@ -101,10 +109,19 @@ def main(argv=None):
             agent.run()
         except KeyboardInterrupt:
             print("退出")
+        except BlockingIOError:
+            print("另一实例正在运行（锁被占用）: {}".format(
+                agent.layout.lock_path), file=sys.stderr)
+            return 3
         return 0
 
     if args.cmd == "doctor":
-        return _doctor(agent, layout)
+        try:
+            return _doctor(agent, layout)
+        except BlockingIOError:
+            print("另一实例正在运行（锁被占用）: {}".format(
+                agent.layout.lock_path), file=sys.stderr)
+            return 3
     return 0
 
 
