@@ -8,6 +8,22 @@ version = "0.1.0"
 description = "Multi-server configuration synchronization agent backed by a dedicated Git repository"
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "hymsk", email = "lxj_hymsk@163.com" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: No Input/Output (Daemon)",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/hymsk/ai-config-sync"
 
 [project.scripts]
 ai-config-sync = "ai_config_sync.cli:main"
