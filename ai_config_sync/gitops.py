@@ -7,8 +7,18 @@
 import os
 import re
 import subprocess
+from pathlib import Path
 
 GIT_TIMEOUT = 120
+
+# 受管文件的双侧修改一律强制冲突（即使行级可自动融合）：
+# attributes 声明 merge=aics-conflict，driver 定义为 false（永远失败）。
+# 单侧修改/不同文件不受 driver 影响，仍由 git 自动收敛。
+MERGE_DRIVER = "merge.aics-conflict.driver"
+MERGE_DRIVER_ATTRS = (
+    "source/** merge=aics-conflict\n"
+    ".sync-config/** merge=aics-conflict\n"
+)
 
 
 class GitError(Exception):
@@ -135,8 +145,30 @@ def fetch(wt):
     run_git(["fetch", "--prune", "origin"], cwd=wt)
 
 
+def ensure_conflict_driver(wt):
+    """幂等写入强制冲突 driver 的本地兜底定义。
+
+    - .git/info/attributes：优先级高于仓库 .gitattributes，使存量配置仓库
+      （种子尚未更新）也立即生效；
+    - 本地 config 定义 driver：没有定义时 git 会静默回退到行级自动合并，
+      该定义保证手工 git merge 同样受保护。
+    agent 自身的 merge 始终通过 -c 注入定义，不依赖这里的状态。
+    """
+    info = Path(wt) / ".git" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    attrs = info / "attributes"
+    text = attrs.read_text(encoding="utf-8") if attrs.is_file() else ""
+    missing = [l for l in MERGE_DRIVER_ATTRS.splitlines(True)
+               if l.strip() and l not in text]
+    if missing:
+        with open(attrs, "a", encoding="utf-8") as f:
+            f.write("".join(missing))
+    run_git(["config", MERGE_DRIVER, "false"], cwd=wt)
+
+
 def merge(wt, ref, allow_unrelated=False):
-    args = ["merge", ref, "--no-edit"]
+    # 命令行注入 driver 定义：不依赖本地 config 是否在位
+    args = ["-c", MERGE_DRIVER + "=false", "merge", ref, "--no-edit"]
     if allow_unrelated:
         args.append("--allow-unrelated-histories")
     rc, _, _ = run_git(args, cwd=wt, check=False)

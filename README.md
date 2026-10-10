@@ -96,15 +96,21 @@ Crash recovery: the journal fsyncs each phase before acting; on restart the last
 
 ## Conflict handling
 
+**Strict conflict definition**: a managed file modified on both sides (host and remote) is always treated as a conflict and handed to a human — even when the edited regions do not overlap and git could auto-merge line-wise. Line-level fusion can produce a mixed configuration neither side wanted, so it is never automatic. One-sided changes and changes to different files still converge automatically.
+
 ```bash
-git -C /var/lib/ai-config-sync/repo ls-files -u   # list conflicted paths
-# resolve by editing (ours=host capture theirs=remote; reversed for adoption merge)
-git -C /var/lib/ai-config-sync/repo add <path>
+git -C /var/lib/ai-config-sync/repo ls-files -u     # list conflicted paths
+# The worktree holds the full ours-side content; both sides stay available:
+git -C /var/lib/ai-config-sync/repo show :2:source/<path>   # ours
+git -C /var/lib/ai-config-sync/repo show :3:source/<path>   # theirs
+# Pick a side per file (ours=host capture theirs=remote; reversed for adoption)
+git -C /var/lib/ai-config-sync/repo checkout --theirs -- source/<path>
+git -C /var/lib/ai-config-sync/repo add <path>      # or edit, then add
 git -C /var/lib/ai-config-sync/repo commit --no-edit
 rm ~/ERROR_MERGE_FLAG
 ```
 
-Deleting the flag without resolving re-sets the flag. A conflict pauses only this machine; other servers keep syncing.
+Deleting the flag without resolving re-sets the flag. A conflict pauses only this machine; other servers keep syncing. The protection is a merge driver (`aics-conflict`) the agent re-asserts every round; manual `git merge` is covered as well.
 
 ## sync.list syntax
 

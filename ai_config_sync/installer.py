@@ -76,6 +76,7 @@ def install_new(layout: Layout, repo_url: str, branch=None, worktree=None,
 
     worktree.parent.mkdir(parents=True, exist_ok=True)
     gitops.clone(repo_url, worktree)
+    gitops.ensure_conflict_driver(worktree)
     if heads:
         gitops.orphan_branch(worktree, branch)
     else:
@@ -119,6 +120,7 @@ def install_attach(layout: Layout, repo_url: str, branch=None, worktree=None,
         branch = default_branch
 
     gitops.clone(repo_url, worktree, branch=branch)
+    gitops.ensure_conflict_driver(worktree)
     cfg = worktree / ".sync-config" / "config.toml"
     if not cfg.is_file():
         raise InstallError("目标仓库缺少 .sync-config/config.toml；不是配置仓库")

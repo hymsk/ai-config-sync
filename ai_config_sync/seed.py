@@ -27,7 +27,13 @@ SYNC_LIST = """\
 # !/root/.config/opencode/*.tmp
 """
 
-GITATTRIBUTES = "* -text\n"
+GITATTRIBUTES = (
+    "* -text\n"
+    "# 同一文件双侧修改一律强制冲突，不做行级自动融合；\n"
+    "# 单侧修改/不同文件不受影响，仍由 git 自动收敛。\n"
+    "source/** merge=aics-conflict\n"
+    ".sync-config/** merge=aics-conflict\n"
+)
 
 README = """\
 # ai-shared-config

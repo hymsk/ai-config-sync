@@ -133,6 +133,7 @@ class Agent:
     def run_once(self):
         """执行（或恢复）一轮事务，返回 (status, message)。"""
         with self._lock():
+            gitops.ensure_conflict_driver(self.wt)
             flag_exists = self.layout.flag.exists()
             resumable = self.journal.resumable()
             if resumable == "corrupt":

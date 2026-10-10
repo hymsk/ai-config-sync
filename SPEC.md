@@ -76,7 +76,7 @@ P0 预检：存在未完成合并 → 置标记并按冲突处理；工作树有
 P1 读取生效配置与清单展开（稳定读：两次哈希一致才采信）
 P2 本机 vs 轮始 HEAD（A）归类变更：内容哈希不同的文件进入收集集
 P3 变更写入工作树 source/... 并提交（仅显式路径，不联网）
-P4 fetch --prune + merge origin/<branch>（冲突 → 置标记保留现场）
+P4 fetch --prune + merge origin/<branch>（同一文件双侧修改 → 强制冲突，置标记保留现场）
 P5 push（non-FF → fetch+merge 重试 ≤3 次，仍失败 → error-transient）
 P6 写回本机（见第 10 节）
 P7 journal checkpointed；下轮 A = 当前 HEAD
@@ -89,9 +89,14 @@ P7 journal checkpointed；下轮 A = 当前 HEAD
 
 ## 8. 冲突处理
 
-- merge 失败时：保留 Git 冲突现场（不 reset、不 clean），置 `~/ERROR_MERGE_FLAG`，journal 记录冲突文件在冲突时刻的主机哈希，状态 `paused-conflict`。主机文件不受污染。
+**冲突定义**：同一受管文件被双侧（本机与远端）相对基线同时修改，即视为冲突并强制交人工——即使行级差异不重叠、git 可以自动融合。文本可自动合并不等于应该自动合并：配置文件的变更意图以文件为单位，行级融合可能产出任何一侧都不想要、且语法仍合法的混合结果。单侧修改或双侧修改不同文件不受影响，仍由 git 自动收敛。
+
+- 实现为 merge driver：`.gitattributes`/`.git/info/attributes` 对 `source/**` 与 `.sync-config/**` 声明 `merge=aics-conflict`，driver 定义为 `false`（永远失败）。agent 的 merge 命令始终通过 `-c` 注入 driver 定义；`run_once` 每轮幂等写入本地兜底（info/attributes + 本地 config），使存量配置仓库自动获得保护，手工 `git merge` 同样生效。
+- 冲突时：保留 Git 冲突现场（不 reset、不 clean），置 `~/ERROR_MERGE_FLAG`，journal 记录冲突文件在冲突时刻的主机哈希，状态 `paused-conflict`。主机文件不受污染。
+- 冲突现场形态：工作树中该文件为 ours 一侧的完整内容（无 `<<<<<<<` 标记），两侧完整内容始终可经 `git show :2:<path>`（ours）/ `:3:<path>`（theirs）获取。
+- 首轮 `--prefer merge` 采用的 add/add 冲突遵循同一现场形态（ours=仓库版 theirs=本机版）；运行期冲突 ours=本机采集版 theirs=远端版。
 - 冲突只暂停本机，其他服务器继续同步。
-- 恢复流程：人工在工作树解决（`add` + `commit`），然后删除标记。下一轮复核：合并未完成 → 重新置标记；工作树未提交内容 → `paused-needs-doctor`；复核通过 → 按记录的主机哈希写回解决结果（主机仍是冲突时刻内容才写；暂停期间又被编辑则留给下轮收集），随后下一轮推送解决提交。
+- 恢复流程：人工在工作树解决（整文件选边 `git checkout --ours/--theirs -- <path>`，或编辑后 `add`），然后 `commit --no-edit`，再删除标记。下一轮复核：合并未完成 → 重新置标记；工作树未提交内容 → `paused-needs-doctor`；复核通过 → 按记录的主机哈希写回解决结果（主机仍是冲突时刻内容才写；暂停期间又被编辑则留给下轮收集），随后下一轮推送解决提交。
 - 只删标记不解决冲突会被重新置标记。
 
 ## 9. 首轮采用
@@ -128,6 +133,7 @@ ai-config-sync once --prefer merge  # 三方裁决：双侧不同的文件产生
 ## 12. Git 操作不变量
 
 - 不 rebase、不 force push、不 reset、不 clean；冲突永远保留现场。
+- 同一文件双侧修改一律强制冲突（merge driver `aics-conflict` 定义为失败），不做行级自动融合；单侧修改与不同文件的自动收敛不受影响（见第 8 节）。
 - 每条命令强制 `core.autocrlf=false`，种子仓库另配 `.gitattributes`（`* -text`），保证字节级保真（哈希对比的前提）。
 - 所有 git 子进程带 120 秒超时（ls-remote 60 秒）。
 - 提交只包含显式收集的路径；工作树出现任何未知改动即暂停等待人工。
@@ -149,4 +155,4 @@ ai-config-sync once --prefer merge  # 三方裁决：双侧不同的文件产生
 ## 15. 验证
 
 - 本地门禁：`python3 -m unittest discover -s tests -t .` 与 `git diff --check`。
-- 测试使用本地 bare 仓库模拟远端、注入式 Layout 模拟多机，覆盖：清单匹配与硬排除、双机同步、冲突暂停与人工恢复（含只删标记重置）、非快进竞态、journal 断点恢复（captured/pushed）、轮中修改保护、删除重建、CRLF 字节保真、安装分支规则（含 --force 孤儿分支与 attach 默认分支）、首轮采用三种方向、认证判定边界、备份修剪、首轮采用推送失败恢复。
+- 测试使用本地 bare 仓库模拟远端、注入式 Layout 模拟多机，覆盖：清单匹配与硬排除、双机同步、冲突暂停与人工恢复（含只删标记重置）、双侧修改同一文件不同区域仍强制冲突（含 add/add 现场两侧 stage 完整性）、非快进竞态、journal 断点恢复（captured/pushed）、轮中修改保护、删除重建、CRLF 字节保真、安装分支规则（含 --force 孤儿分支与 attach 默认分支）、首轮采用三种方向、认证判定边界、备份修剪、首轮采用推送失败恢复、强制冲突 driver 的幂等写入与本地兜底。

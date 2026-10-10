@@ -12,6 +12,19 @@ Version history is kept newest first. The repository is currently a private, unr
 
 ### Changed
 
+- **Dual modification of the same file now always conflicts.** A merge driver
+  (`aics-conflict`, defined as always-fail) is declared for `source/**` and
+  `.sync-config/**`, so a file changed on both the host and the remote is
+  handed to a human even when git could auto-merge the changes line-wise —
+  line-level fusion could silently produce a mixed configuration neither
+  side wanted. One-sided changes and changes to different files still
+  converge automatically. The conflict scene changes accordingly: the
+  worktree keeps the full ours-side content without `<<<<<<<` markers, with
+  both sides available through index stages `:2:`/`:3:`. The agent injects
+  the driver definition into every merge and re-asserts the local fallback
+  (`.git/info/attributes` + local config) each round, so existing
+  installations gain the protection without manual upgrades and manual
+  `git merge` is covered as well.
 - `state/sync.log` rotates (1 MB, 5 backups) instead of growing unbounded.
 - Exit code 3 with a clear message when another instance holds the lock (`run`, `once --prefer`, `doctor`).
 - `sync_list._match` / `_in_zones` are now public `match_path` / `in_zones`.

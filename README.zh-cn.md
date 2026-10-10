@@ -104,15 +104,23 @@ P7 journal checkpointed（下轮 A = 当前 HEAD）
 
 ## 冲突处理
 
+**冲突定义从严**：同一文件被双侧（本机与远端）同时修改即视为冲突，强制交人工——即使改动区域不重叠、行级可自动融合。行级融合可能产出任何一侧都不想要的混合配置，因此不做自动融合；单侧修改、双侧修改不同文件仍自动同步。
+
 ```bash
 git -C /var/lib/ai-config-sync/repo ls-files -u   # 查看冲突路径
-# 编辑解决（ours=本机采集版 theirs=远端版；首轮 merge 采用时相反）
-git -C /var/lib/ai-config-sync/repo add <路径>
+# 工作树中该文件为 ours 侧完整内容；两侧内容可分别查看：
+git -C /var/lib/ai-config-sync/repo show :2:source/<路径>   # ours
+git -C /var/lib/ai-config-sync/repo show :3:source/<路径>   # theirs
+# 整文件选边（ours=本机采集版 theirs=远端版；首轮 merge 采用时相反）
+git -C /var/lib/ai-config-sync/repo checkout --theirs -- source/<路径>
+git -C /var/lib/ai-config-sync/repo add <路径>              # 或编辑后 add
 git -C /var/lib/ai-config-sync/repo commit --no-edit
 rm ~/ERROR_MERGE_FLAG
 ```
 
 只删标记不解决冲突会被重新置标记。冲突只暂停本机，其他服务器继续同步。
+该保护通过 merge driver（`aics-conflict`）实现，agent 每轮自动确保其在位，
+手工 `git merge` 同样受保护。
 
 ## sync.list 语法
 

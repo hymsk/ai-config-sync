@@ -165,6 +165,29 @@ class E2E(unittest.TestCase):
         self.assertEqual(self.a1.run_once()[0], "ok")
         self.assertEqual(self._repo_blob("source" + str(f)), "resolved\n")
 
+    def test_same_file_dual_edit_forces_conflict(self):
+        """双侧改同一文件的不同区域：即使行级可自动融合也必须强制冲突。
+
+        没有 merge driver 时 git 会静默融合两侧改动（本用例在修复前
+        表现为 ok），这里锁定强制人工的行为。
+        """
+        f = host_file(self.host, "conf/r.txt",
+                      "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
+        self.assertEqual(self.a1.run_once()[0], "ok")
+        # 远端改尾部，本机改头部：区域不重叠
+        manual_push(self.remote, self.root / "other",
+                    [("source" + str(f),
+                      "l1\nl2\nl3\nl4\nl5\nl6\nl7\nL8-REMOTE\n")],
+                    "remote tail edit")
+        f.write_text("L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
+        self.a1._last_fetch = 0.0
+        status, _ = self.a1.run_once()
+        self.assertEqual(status, "paused-conflict")
+        self.assertTrue(self.layout1.flag.exists())
+        wt = self.layout1.default_worktree
+        self.assertIn("source" + str(f), gitops.unmerged_paths(wt))
+        self.assertEqual(f.read_text(), "L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
+
     def test_midround_host_edit_not_overwritten(self):
         f = host_file(self.host, "conf/a.txt", "v0\n")
         self.assertEqual(self.a1.run_once()[0], "ok")
@@ -237,9 +260,13 @@ class E2E(unittest.TestCase):
         self.assertEqual(status, "paused-conflict")
         self.assertTrue(self.layout1.flag.exists())
         wt = self.layout1.default_worktree
+        # driver 强制冲突：工作树保留 ours（仓库版），两侧完整内容在 stage 2/3
         content = (wt / ("source" + str(f))).read_text()
         self.assertIn("repo-version", content)
-        self.assertIn("host-version", content)
+        self.assertEqual(
+            git(["show", ":2:source" + str(f)], cwd=wt), "repo-version\n")
+        self.assertEqual(
+            git(["show", ":3:source" + str(f)], cwd=wt), "host-version\n")
         (wt / ("source" + str(f))).write_text("merged-result\n")
         git(["add", "source" + str(f)], cwd=wt)
         git(["commit", "--no-edit"], cwd=wt)
