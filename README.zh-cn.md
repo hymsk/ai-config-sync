@@ -3,16 +3,18 @@
 > 通过专用 Git 仓库，在 Linux 主机之间单向归档与还原配置文件。
 
 一个规则驱动的命令行工具，只有两个显式、手动触发的操作，无常驻进程、
-无自动双向收敛：
+无自动双向收敛、**不做任何合并**：
 
-- `push`（本机 → 仓库）：把本机受管文件归档到配置仓库，提交并推送。
+- `push`（本机 → 仓库）：把本机受管文件归档为配置仓库 `source/` 的精确镜像，
+  提交并推送。
 - `pull`（仓库 → 本机）：把配置仓库中的受管文件写回本机，写前备份、
   格式校验、原子替换。
 
 [English](README.md) · [规范](SPEC.md) · [版本记录](CHANGELOG.md)
 
 - 纯规则驱动，无 LLM、无外部 Python 依赖（Python >= 3.9，自带极简 TOML 解析）。
-- 全程不 rebase、不 force push、不 reset、不 clean；合并冲突始终保留现场交人工处理。
+- 全程不 rebase、不 force push、不 reset、不 clean、**不做三方合并**：
+  本地分支只允许 `--ff-only` 快进对齐远端；真分叉一律报错保留现场交人工。
 - 以文件为准：所有变更判定都是"主机文件 Hash <-> Git blob Hash"即时对比，
   不维护 per-file 状态文件。
 
@@ -73,22 +75,34 @@ ai-config-sync pull   # 仓库 → 本机：备份后写回受管文件
 ### push（本机 → 仓库）
 
 ```text
-1. 取独占锁；要求工作树干净（有未知改动 → error-dirty）
-2. 读取生效配置与清单展开（稳定读：两次 Hash 一致）
-3. 本机变更写入工作树 source/... 并提交（仅显式路径，不联网）
-4. fetch + merge origin/<branch>（仅快进/干净合并；
-   真实冲突 → error-conflict，保留现场交人工）
-5. push（non-FF → fetch+merge 重试 ≤3，仍失败 → error-transient）
-6. 报告归档文件数
+1. 取独占锁
+2. fetch + 把本地分支**只快进**对齐远端（--ff-only，无任何合并；
+   真分叉 → error-conflict，保留现场交人工）
+3. 要求工作树干净（有未知改动 → error-dirty）
+4. 读取生效配置与清单展开（稳定读：两次 Hash 一致）
+5. 前缀检查：每条纳入规则的字面前缀必须存在于本机
+   （显式列出的文件没了，或 /etc/xxx/** 的 /etc/xxx 整个不存在
+    → error-missing：先改 sync.list 或恢复路径再重跑；
+    目录里具体文件被删不算错——走镜像移除）
+6. 本机变更写入工作树 source/...
+7. 镜像移除：命中清单但本机已不存在的受管路径从仓库 git rm
+   （删除沿 push 方向传播）
+8. 提交（仅显式路径，不联网），然后 push（被拒=推送竞态 → 报错提示重跑，
+   不自动重试）
+9. 报告归档/移除文件数
 ```
+
+镜像语义：`push` 是"最后推送者获胜"。他机归档、而本机没有的文件，push 时
+会被**移除**；想保留请先 `pull` 再 `push`。同文件双侧修改**永不冲突**：
+本机内容直接覆盖远端（本地优先）；想接受远端版本，同样先 `pull`。
 
 ### pull（仓库 → 本机）
 
 ```text
 1. 取独占锁
-2. fetch + merge origin/<branch>（仅快进/干净合并；
-   真实冲突 → error-conflict，保留现场）
-3. 读取生效配置与清单展开
+2. fetch + 只快进对齐（规则同 push 第 2 步）
+3. 读取生效配置与清单展开（含"仓库有、清单命中、本机缺失"的路径——
+   这正是 pull 要重建的内容）
 4. 对 HEAD 中每个命中清单的 source/... 文件：
    - 本机内容已一致 → 跳过
    - .json/.toml 格式校验失败 → 跳过并计入 skipped
@@ -97,8 +111,7 @@ ai-config-sync pull   # 仓库 → 本机：备份后写回受管文件
 5. 报告写回/跳过文件数
 ```
 
-删除不传播：本机缺失的文件不会被 `push` 从仓库删除；仓库没有的文件
-不会被 `pull` 从本机删除。
+删除不跨过 `pull`：仓库没有的路径，`pull` 永远不会从本机删除。
 
 ## sync.list 语法
 
@@ -124,20 +137,21 @@ email = "sync-bot@invalid"
 
 ## 冲突处理
 
-**冲突定义从严**：同一文件被双侧修改即视为冲突，强制交人工——即使改动区域
-不重叠、行级可自动融合。该保护通过 merge driver（`aics-conflict`）实现，
-工具会确保其在位，手工 `git merge` 同样受保护。
+没有合并引擎：`push`/`pull` 对本地分支只做 `--ff-only` 快进。由此：
+
+- **同文件双侧修改** —— `push` 不可能冲突：操作是镜像，本机内容直接覆盖
+  远端（本地优先）。想接受远端版本，先执行 `pull`。
+- **分支分叉**（本地与远端各有对方没有的提交，通常是有人在 worktree 手工
+  提交）—— `push`/`pull` 以 `error-conflict` 停止并保留现场，交人工：
 
 ```bash
-git -C /var/lib/ai-config-sync/repo ls-files -u     # 查看冲突路径
-# 工作树中该文件为 ours 侧完整内容；两侧内容可分别查看：
-git -C /var/lib/ai-config-sync/repo show :2:source/<路径>   # ours
-git -C /var/lib/ai-config-sync/repo show :3:source/<路径>   # theirs
-# 整文件选边，然后提交并重试：
-git -C /var/lib/ai-config-sync/repo checkout --theirs -- source/<路径>
-git -C /var/lib/ai-config-sync/repo add <路径>              # 或编辑后 add
-git -C /var/lib/ai-config-sync/repo commit --no-edit
+cd /var/lib/ai-config-sync/repo
+git log --oneline --graph --all          # 查看分叉情况
+# 要么手工推送本地提交，要么有意丢弃之，然后重跑 ai-config-sync push / pull
 ```
+
+- **推送被拒（non-fast-forward）** —— 另一台机器恰好在你的 fetch 与 push
+  之间推了内容。重跑命令即可：会重新对齐并再次归档。
 
 ## 卸载
 
@@ -152,11 +166,12 @@ bash deploy/uninstall.sh --purge-data
 
 ## 已知边界
 
-- 文件删除不自动传播（两个方向都不传播）。
+- 删除只沿 push 方向传播（镜像移除）；`pull` 永不删除本机文件。
+- 多机镜像语义：最后推送者获胜；想保留他机归档的文件，先 `pull` 再 `push`。
 - 应用自身会重写的配置文件会造成归档回流，不要纳入清单。
 - 所有机器共用同一份清单与配置（无机器差异）。
 - 只处理普通文件；软链接跳过并告警。
-- 无常驻进程、无自动双向收敛、无崩溃恢复 journal、无冲突暂停标记。
+- 无常驻进程、无任何合并、无崩溃恢复 journal、无冲突暂停标记。
 - 凭据文件（token/私钥/API key 等）默认排除、不建议纳入；仓库所有者可显式授权同步
   （私有仓库不是凭据保险箱：明文凭据会进入 Git 历史并复制到每一个 pull 的主机）。
 
@@ -168,9 +183,9 @@ python3 -m unittest discover -s tests -t . -v
 ```
 
 测试使用本地 bare 仓库模拟远端，覆盖：清单匹配与硬排除、`push` 归档与推送、
-`pull` 写回与备份、格式校验跳过、删除不传播、软链接跳过、CRLF 字节保真、
-安装分支规则（含 `--force` 孤儿分支与 attach 默认分支）、认证判定边界、
-备份修剪、非快进重试。
+镜像移除、清单前缀缺失报错、快进对齐与分叉报错、`pull` 写回与备份、
+格式校验跳过、软链接跳过、CRLF 字节保真、安装分支规则（含 `--force`
+孤儿分支与 attach 默认分支）、认证判定边界、备份修剪。
 
 ## 许可证
 

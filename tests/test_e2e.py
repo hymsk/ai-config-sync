@@ -78,14 +78,68 @@ class E2E(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertEqual(self._repo_blob("source" + str(f)), "v1\n")
 
-    def test_push_does_not_delete_repo_files(self):
-        """本机缺失、仓库有的文件在 push 下不被删除。"""
+    def test_push_removes_deleted_host_files(self):
+        """真镜像：本机删除的受管文件在 push 时从仓库移除。"""
         f = host_file(self.host, "conf/a.txt", "v0\n")
         self.assertEqual(self.s1.push()[0], "ok")
         f.unlink()
-        status, _ = self.s1.push()
+        status, msg = self.s1.push()
         self.assertEqual(status, "ok")
-        self.assertEqual(self._repo_blob("source" + str(f)), "v0\n")
+        self.assertIn("移除 1", msg)
+        with self.assertRaises(AssertionError):
+            self._repo_blob("source" + str(f))
+
+    def test_push_missing_explicit_file_errors(self):
+        """显式文件规则指向的本机文件缺失 → error-missing。"""
+        missing = self.host / "conf" / "gone.txt"
+        list_path = (self.layout1.default_worktree / ".sync-config"
+                     / "sync.list")
+        list_path.write_text(
+            "{}/**\n{}\n".format(self.host, missing), encoding="utf-8")
+        gitops.add(self.layout1.default_worktree,
+                   [".sync-config/sync.list"])
+        gitops.commit(self.layout1.default_worktree, "chore: add rule",
+                      ("test-bot", "test-bot@invalid"))
+        gitops.push(self.layout1.default_worktree, "main")
+        with self.assertRaises(SyncError) as cm:
+            self.s1.push()
+        self.assertEqual(cm.exception.status, "error-missing")
+
+    def test_push_missing_wildcard_prefix_dir_errors(self):
+        """目录前缀整体不存在（如 /etc/xxx/** 而 /etc/xxx 没了）→ error-missing。"""
+        gone = self.root / "etc-xxx"
+        list_path = (self.layout1.default_worktree / ".sync-config"
+                     / "sync.list")
+        list_path.write_text(
+            "{}/**\n{}\n".format(self.host, str(gone) + "/**"),
+            encoding="utf-8")
+        gitops.add(self.layout1.default_worktree,
+                   [".sync-config/sync.list"])
+        gitops.commit(self.layout1.default_worktree, "chore: add dir rule",
+                      ("test-bot", "test-bot@invalid"))
+        gitops.push(self.layout1.default_worktree, "main")
+        with self.assertRaises(SyncError) as cm:
+            self.s1.push()
+        self.assertEqual(cm.exception.status, "error-missing")
+
+    def test_push_deleted_file_under_existing_prefix_silent(self):
+        """前缀存在、目录内具体文件被删 → 静默移除，不报 error-missing。"""
+        f = host_file(self.host, "conf/b.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        f.unlink()
+        status, msg = self.s1.push()
+        self.assertEqual(status, "ok")
+        with self.assertRaises(AssertionError):
+            self._repo_blob("source" + str(f))
+
+    def test_pull_does_not_require_prefix_existence(self):
+        """pull 不做前缀存在检查：本机缺失正是要重建的场景。"""
+        f = host_file(self.host, "conf/c.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        f.unlink()
+        status, _ = self.s1.pull()
+        self.assertEqual(status, "ok")
+        self.assertEqual(f.read_text(), "v0\n")
 
     def test_push_when_clean_reports_noop(self):
         host_file(self.host, "conf/a.txt", "v0\n")
@@ -110,17 +164,71 @@ class E2E(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertIn("未稳定", msg)
 
-    def test_push_nonff_retry(self):
+    def test_push_nonff_aligns_then_pushes(self):
+        """远端先前进：fetch 后本地只快进对齐，再提交推送。
+
+        注意镜像语义：本机没有 m2/b.txt，push 后它被从仓库移除
+        （真镜像 = 命中清单但本机不存在的文件从仓库删掉）。
+        """
         f = host_file(self.host, "m1/a.txt", "one\n")
-        # 其他机器抢先推送了另一个文件（触发 non-FF）
         manual_push(self.remote, self.root / "other",
                     [("source" + str(self.host / "m2/b.txt"), "two\n")],
                     "other machine")
-        status, _ = self.s1.push()
+        status, msg = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertEqual(self._repo_blob("source" + str(f)), "one\n")
+        self.assertIn("移除 1", msg)
+        with self.assertRaises(AssertionError):
+            self._repo_blob("source" + str(self.host / "m2/b.txt"))
+
+    def test_push_pull_first_keeps_other_hosts_file(self):
+        """多机协作流：先 pull 再 push，则保留他机归档的文件。"""
+        f = host_file(self.host, "m1/a.txt", "one\n")
+        manual_push(self.remote, self.root / "other",
+                    [("source" + str(self.host / "m2/b.txt"), "two\n")],
+                    "other machine")
+        # 先 pull：b.txt 写回本机（仓库有、清单命中、本机缺失 → 重建）
+        self.assertEqual(self.s1.pull()[0], "ok")
+        self.assertEqual((self.host / "m2" / "b.txt").read_text(), "two\n")
+        # 再 push：b.txt 已存在于本机，不会被移除
+        status, msg = self.s1.push()
         self.assertEqual(status, "ok")
         self.assertEqual(self._repo_blob("source" + str(f)), "one\n")
         self.assertEqual(
             self._repo_blob("source" + str(self.host / "m2/b.txt")), "two\n")
+
+    def test_push_remote_edit_overwritten_by_local_mirror(self):
+        """同文件双侧修改：无 merge，push 以本机为准覆盖远端（本地优先）。"""
+        f = host_file(self.host, "conf/r.txt",
+                      "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        manual_push(self.remote, self.root / "other",
+                    [("source" + str(f),
+                      "l1\nl2\nl3\nl4\nl5\nl6\nl7\nL8-REMOTE\n")],
+                    "remote tail edit")
+        f.write_text("L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
+        status, _ = self.s1.push()
+        self.assertEqual(status, "ok")
+        # 远端最终为本机内容：镜像语义，本地优先
+        self.assertEqual(
+            self._repo_blob("source" + str(f)),
+            "L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
+
+    def test_diverged_worktree_errors(self):
+        """本地与远端分叉（人工在 worktree 提交了改动）→ error-conflict。"""
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        # 人工在 worktree 提交 + 远端也前进 → 真分叉
+        wt = self.layout1.default_worktree
+        (wt / "README.md").write_text("manual\n", encoding="utf-8")
+        gitops.add(wt, ["README.md"])
+        gitops.commit(wt, "manual edit", ("test-bot", "test-bot@invalid"))
+        manual_push(self.remote, self.root / "other",
+                    [("source" + str(f), "v-remote\n")], "other machine")
+        with self.assertRaises(SyncError) as cm:
+            self.s1.push()
+        self.assertEqual(cm.exception.status, "error-conflict")
+        self.assertIn("分叉", cm.exception.message)
 
     def test_push_symlink_skipped(self):
         f = host_file(self.host, "conf/real.txt", "real\n")
@@ -196,25 +304,7 @@ class E2E(unittest.TestCase):
         # m2 上同一 host 路径即同一绝对路径（多机共用清单）
         self.assertEqual(f.read_text(), "from-m1\n")
 
-    def test_conflict_forces_manual(self):
-        """同一文件双侧修改：merge driver 强制冲突，保留现场。"""
-        f = host_file(self.host, "conf/r.txt",
-                      "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
-        self.assertEqual(self.s1.push()[0], "ok")
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(f),
-                      "l1\nl2\nl3\nl4\nl5\nl6\nl7\nL8-REMOTE\n")],
-                    "remote tail edit")
-        f.write_text("L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
-        with self.assertRaises(SyncError) as cm:
-            self.s1.push()
-        self.assertEqual(cm.exception.status, "error-conflict")
-        wt = self.layout1.default_worktree
-        self.assertTrue(gitops.unmerged_paths(wt))
-
-    # ---------- 字节保真 ----------
-
-    def test_crlf_bytes_preserved(self):
+    def test_push_symlink_skipped(self):
         old_global = os.environ.get("GIT_CONFIG_GLOBAL")
         cfg = self.root / "gitcfg"
         cfg.write_text("[core]\n\tautocrlf = input\n")

@@ -91,7 +91,8 @@ def match_path(rules, path: str) -> bool:
     return bool(included)
 
 
-def _literal_prefix(pattern: str) -> str:
+def literal_prefix(pattern: str) -> str:
+    """规则中第一个通配符之前的字面路径（不含通配段）。"""
     segs = pattern.strip("/").split("/")
     acc = []
     for seg in segs:
@@ -167,7 +168,7 @@ def expand(rules, hard_zones, log=None):
         segs = rule.pattern.strip("/").split("/")
         if ".git" in segs:
             raise SyncListError("sync.list 规则指向 .git: {}".format(rule.pattern))
-        prefix = _literal_prefix(rule.pattern)
+        prefix = literal_prefix(rule.pattern)
         for root in FORBIDDEN_ROOTS:
             if _under(prefix, root):
                 raise SyncListError(

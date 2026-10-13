@@ -1,6 +1,5 @@
-"""单元与回归测试：认证判定、备份修剪、冲突 driver 幂等。"""
+"""单元与回归测试：认证判定、备份修剪、配置解析。"""
 
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,44 +95,6 @@ class ApplierPruneTest(unittest.TestCase):
         other.write_text("b\n")
         applier.prune_backups(self.backups, self.repo_path, keep=0)
         self.assertTrue(other.exists())
-
-
-class ConflictDriverTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.wt = Path(self.tmp.name) / "wt"
-        subprocess.run(["git", "init", "-q", str(self.wt)], check=True)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_ensure_writes_attributes_and_config(self):
-        gitops.ensure_conflict_driver(self.wt)
-        attrs = (self.wt / ".git" / "info" / "attributes").read_text(
-            encoding="utf-8")
-        self.assertIn("source/** merge=aics-conflict", attrs)
-        self.assertIn(".sync-config/** merge=aics-conflict", attrs)
-        check = subprocess.run(
-            ["git", "-C", str(self.wt), "config", "merge.aics-conflict.driver"],
-            capture_output=True, text=True)
-        self.assertEqual(check.stdout.strip(), "false")
-
-    def test_ensure_idempotent(self):
-        gitops.ensure_conflict_driver(self.wt)
-        attrs_path = self.wt / ".git" / "info" / "attributes"
-        once = attrs_path.read_text(encoding="utf-8")
-        gitops.ensure_conflict_driver(self.wt)
-        self.assertEqual(attrs_path.read_text(encoding="utf-8"), once)
-        self.assertEqual(once.count("source/**"), 1)
-
-    def test_ensure_preserves_existing_attributes(self):
-        attrs_path = self.wt / ".git" / "info" / "attributes"
-        attrs_path.parent.mkdir(parents=True, exist_ok=True)
-        attrs_path.write_text("custom/** -text\n", encoding="utf-8")
-        gitops.ensure_conflict_driver(self.wt)
-        text = attrs_path.read_text(encoding="utf-8")
-        self.assertIn("custom/** -text", text)
-        self.assertIn("source/** merge=aics-conflict", text)
 
 
 class RepoConfigTest(unittest.TestCase):

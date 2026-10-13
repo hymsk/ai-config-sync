@@ -25,10 +25,7 @@ SYNC_LIST = """\
 
 GITATTRIBUTES = (
     "* -text\n"
-    "# 同一文件双侧修改一律强制冲突，不做行级自动融合；\n"
-    "# 单侧修改/不同文件不受影响，仍由 git 自动收敛。\n"
-    "source/** merge=aics-conflict\n"
-    ".sync-config/** merge=aics-conflict\n"
+    "# 字节级保真：不做任何行尾或编码转换。\n"
 )
 
 README = """\

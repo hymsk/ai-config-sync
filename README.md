@@ -2,15 +2,15 @@
 
 > Archive and restore configuration files on Linux hosts through a dedicated Git repository, one direction at a time.
 
-A rule-driven CLI with two explicit, manually triggered operations — no daemon, no automatic two-way convergence:
+A rule-driven CLI with two explicit, manually triggered operations — no daemon, no automatic two-way convergence, **no merging of any kind**:
 
-- `push` (host -> repo): archive managed host files into the config repository, commit, and push.
+- `push` (host -> repo): make the repo's `source/` an exact mirror of this host's managed files, commit, and push.
 - `pull` (repo -> host): write the config repository's managed files back to this host, with a pre-write backup, format validation, and atomic replace.
 
 [中文](README.zh-cn.md) · [Specification](SPEC.md) · [Changelog](CHANGELOG.md)
 
 - Pure rule-driven: no LLM, no external Python dependencies (Python >= 3.9, ships a minimal TOML parser).
-- Never rebases, force-pushes, resets or cleans; a merge conflict always preserves the scene for manual resolution.
+- Never rebases, force-pushes, resets, cleans or merges: the local branch only ever fast-forwards (`--ff-only`) to the remote; a real divergence is reported for manual handling, with the scene preserved.
 - File-truth model: every change decision is an immediate "host file hash <-> Git blob hash" comparison; no per-file state files.
 
 ## Two repositories
@@ -69,22 +69,36 @@ Both are one-shot and manually triggered. Each acquires an exclusive lock while 
 ### push (host -> repo)
 
 ```text
-1. acquire the lock; require a clean worktree (unknown changes -> error-dirty)
-2. read effective config and expand the include list (stable read: two hashes agree)
-3. write host changes into the worktree source/... and commit (explicit paths, offline)
-4. fetch + merge origin/<branch> (fast-forward / clean merge only;
-   a real conflict -> error-conflict, scene preserved for manual resolution)
-5. push (non-FF -> fetch+merge retry <= 3, then error-transient)
-6. report the number of archived files
+1. acquire the lock
+2. fetch + fast-forward-only align with origin/<branch> (no merge of any kind;
+   a real divergence -> error-conflict, scene preserved for manual resolution)
+3. require a clean worktree (unknown changes -> error-dirty)
+4. read effective config and expand the include list (stable read: two hashes agree)
+5. prefix check: every include rule's literal prefix must exist on this host
+   (an explicitly listed file gone, or a whole dir like /etc/xxx/** missing
+    -> error-missing: fix sync.list or restore the path, then re-run;
+    a mere file deleted inside an existing dir is fine — mirror removal)
+6. write host changes into the worktree source/...
+7. mirror removal: managed paths that no longer exist on this host are
+   git-rm'ed from the repo (deletions propagate in the push direction)
+8. commit (explicit paths, offline), then push (a non-FF rejection — a push
+   race — reports an error telling you to re-run; no automatic retry)
+9. report archived/removed counts
 ```
+
+Mirror semantics: `push` is "the last pusher wins". A file another machine
+archived but this host lacks is **removed** from the repo; to keep it, `pull`
+first, then `push`. A file modified on both sides never conflicts — the local
+content simply overwrites the remote (local priority); to accept the remote
+version, `pull` first.
 
 ### pull (repo -> host)
 
 ```text
 1. acquire the lock
-2. fetch + merge origin/<branch> (fast-forward / clean merge only;
-   a real conflict -> error-conflict, scene preserved)
-3. read effective config and expand the include list
+2. fetch + fast-forward-only align (same rules as push step 2)
+3. read effective config and expand the include list (including repo-side
+   paths missing on this host — that is what pull reconstructs)
 4. for each managed source/... file in HEAD:
    - identical on host -> skip
    - .json/.toml failing validation -> skip (counted as skipped)
@@ -93,7 +107,8 @@ Both are one-shot and manually triggered. Each acquires an exclusive lock while 
 5. report written/skipped counts
 ```
 
-Deletions never propagate: a file missing on the host is not deleted from the repo by `push`, and a file absent from the repo is not deleted from the host by `pull`.
+Deletions never cross `pull`: a path absent from the repo is never deleted
+from the host by `pull`.
 
 ## sync.list syntax
 
@@ -119,18 +134,26 @@ email = "sync-bot@invalid"
 
 ## Conflict handling
 
-**Strict conflict definition**: a managed file modified on both sides (host and remote) is always treated as a conflict and handed to a human — even when the edited regions do not overlap and git could auto-merge line-wise. The protection is a merge driver (`aics-conflict`) the tool re-asserts, so manual `git merge` is covered as well.
+There is no merge engine: `push` and `pull` only ever fast-forward the local
+branch (`--ff-only`). Consequences:
+
+- **Same file changed on both sides** — no conflict is possible during `push`:
+  the operation is a mirror, local content overwrites the remote (local
+  priority). To accept the remote version instead, run `pull` first.
+- **Diverged branch** (local and remote each hold commits the other lacks,
+  usually from manual edits in the worktree) — `push`/`pull` stop with
+  `error-conflict` and preserve the scene for a human:
 
 ```bash
-git -C /var/lib/ai-config-sync/repo ls-files -u     # list conflicted paths
-# The worktree holds the full ours-side content; both sides stay available:
-git -C /var/lib/ai-config-sync/repo show :2:source/<path>   # ours
-git -C /var/lib/ai-config-sync/repo show :3:source/<path>   # theirs
-# Pick a side per file, then commit and re-run:
-git -C /var/lib/ai-config-sync/repo checkout --theirs -- source/<path>
-git -C /var/lib/ai-config-sync/repo add <path>      # or edit, then add
-git -C /var/lib/ai-config-sync/repo commit --no-edit
+cd /var/lib/ai-config-sync/repo
+git log --oneline --graph --all          # inspect the divergence
+# either push your local commits manually, or drop them deliberately,
+# then re-run ai-config-sync push / pull
 ```
+
+- **Push rejected (non-fast-forward)** — another machine pushed between your
+  fetch and your push. Re-run the command; it re-aligns and retries the
+  archive.
 
 ## Uninstallation
 
@@ -144,11 +167,12 @@ Data directories are preserved by default; note the working tree may contain unp
 
 ## Known limits
 
-- File deletions do not propagate in either direction.
+- Deletions propagate in the push direction only (mirror removal); `pull` never deletes host files.
+- Multi-machine mirror semantics: the last pusher wins; pull before push if you want to keep another machine's archived files.
 - Config files rewritten by their own application create archive feedback loops; do not include them.
 - All machines share one include list and one config; no per-machine variance.
 - Only regular files; symlinks are skipped with a warning.
-- No daemon, no automatic two-way convergence, no crash-recovery journal, no conflict pause flag.
+- No daemon, no merging of any kind, no crash-recovery journal, no conflict pause flag.
 - Credential files (tokens, private keys, API keys) are excluded by default and should not be included; the repository owner may explicitly authorize syncing them (a private repo is still not a credential vault — plaintext credentials enter Git history and are copied to every host that pulls).
 
 ## Development and testing
@@ -158,7 +182,7 @@ python3 -m pip install -e .
 python3 -m unittest discover -s tests -t . -v
 ```
 
-Tests use a local bare repository as the remote and cover: include-list matching and hard exclusion, `push` archiving and pushing, `pull` write-back with backup, format-validation skips, deletion non-propagation, symlink skipping, CRLF byte fidelity, installation branch rules (including `--force` orphan branches and attach default-branch resolution), auth-error boundaries, backup pruning, and non-fast-forward retry.
+Tests use a local bare repository as the remote and cover: include-list matching and hard exclusion, `push` archiving and pushing, mirror removal, missing-prefix errors, fast-forward alignment and divergence errors, `pull` write-back with backup, format-validation skips, symlink skipping, CRLF byte fidelity, installation branch rules (including `--force` orphan branches and attach default-branch resolution), auth-error boundaries, and backup pruning.
 
 ## License
 

@@ -1,24 +1,15 @@
 """全部 Git 操作的唯一封装。
 
-不变量：不 rebase、不 force push、不 reset、不 clean；冲突保留现场；
+不变量：不 rebase、不 force push、不 reset、不 clean；不做三方合并，
+本地分支只允许 --ff-only 快进对齐远端；冲突保留现场；
 每条命令强制 core.autocrlf=false，保证字节级保真（哈希对比前提）。
 """
 
 import os
 import re
 import subprocess
-from pathlib import Path
 
 GIT_TIMEOUT = 120
-
-# 受管文件的双侧修改一律强制冲突（即使行级可自动融合）：
-# attributes 声明 merge=aics-conflict，driver 定义为 false（永远失败）。
-# 单侧修改/不同文件不受 driver 影响，仍由 git 自动收敛。
-MERGE_DRIVER = "merge.aics-conflict.driver"
-MERGE_DRIVER_ATTRS = (
-    "source/** merge=aics-conflict\n"
-    ".sync-config/** merge=aics-conflict\n"
-)
 
 
 class GitError(Exception):
@@ -109,21 +100,6 @@ def status_porcelain(wt):
     return [l for l in out.decode("utf-8", "replace").splitlines() if l.strip()]
 
 
-def unmerged_paths(wt):
-    _, out, _ = run_git(["ls-files", "-u"], cwd=wt)
-    paths = []
-    for line in out.decode("utf-8", "replace").splitlines():
-        if "\t" in line:
-            p = line.split("\t", 1)[1]
-            if p not in paths:
-                paths.append(p)
-    return paths
-
-
-def merge_in_progress(wt):
-    return ref_sha(wt, "MERGE_HEAD") is not None
-
-
 def add(wt, paths):
     if not paths:
         return
@@ -143,33 +119,24 @@ def fetch(wt):
     run_git(["fetch", "--prune", "origin"], cwd=wt)
 
 
-def merge(wt, ref):
-    # 命令行注入 driver 定义：同一文件双侧修改强制冲突，保留现场
-    rc, _, _ = run_git(
-        ["-c", MERGE_DRIVER + "=false", "merge", ref, "--no-edit"],
-        cwd=wt, check=False)
-    return rc
+def is_ancestor(wt, a, b) -> bool:
+    """a 是否为 b 的祖先（b 的历史是否包含 a）。"""
+    rc, _, _ = run_git(["merge-base", "--is-ancestor", a, b], cwd=wt,
+                       check=False)
+    return rc == 0
 
 
-def ensure_conflict_driver(wt):
-    """幂等写入强制冲突 driver 的本地兜底定义。
+def fast_forward(wt, ref):
+    """把当前分支快进到 ref（--ff-only：无三方合并，无冲突可能）。"""
+    run_git(["merge", "--ff-only", ref, "--no-edit"], cwd=wt)
 
-    - .git/info/attributes：优先级高于仓库 .gitattributes，使存量配置仓库
-      （种子尚未更新）也立即生效；
-    - 本地 config 定义 driver：没有定义时 git 会静默回退到行级自动合并，
-      该定义保证手工 git merge 同样受保护。
-    本工具的 merge 始终通过 -c 注入定义，不依赖这里的状态。
-    """
-    info = Path(wt) / ".git" / "info"
-    info.mkdir(parents=True, exist_ok=True)
-    attrs = info / "attributes"
-    text = attrs.read_text(encoding="utf-8") if attrs.is_file() else ""
-    missing = [l for l in MERGE_DRIVER_ATTRS.splitlines(True)
-               if l.strip() and l not in text]
-    if missing:
-        with open(attrs, "a", encoding="utf-8") as f:
-            f.write("".join(missing))
-    run_git(["config", MERGE_DRIVER, "false"], cwd=wt)
+
+def rm(wt, paths):
+    """从索引与工作树移除显式路径（--ignore-unmatch 容忍已不存在的路径）。"""
+    if not paths:
+        return
+    run_git(["rm", "-q", "--ignore-unmatch", "--"] +
+            [str(p) for p in paths], cwd=wt)
 
 
 def push(wt, branch, set_upstream=False):
@@ -203,4 +170,13 @@ def is_auth_error(stderr: str) -> bool:
         "authentication", "permission denied (publickey", "403",
         "could not read username", "publickey", "access denied",
         "http 401", "fatal: could not read",
+    ))
+
+
+def is_nonff_error(stderr: str) -> bool:
+    """推送被拒：远端在本地之后又有新提交（non-fast-forward）。"""
+    text = (stderr or "").lower()
+    return any(k in text for k in (
+        "non-fast-forward", "non fast forward", "fetch first", "(rejected)",
+        "stale info",
     ))
