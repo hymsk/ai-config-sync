@@ -7,21 +7,57 @@ from pathlib import Path
 
 from . import tomlite
 
+try:  # Python 3.11+ standard library
+    import tomllib as _toml_strict
+except ModuleNotFoundError:  # pragma: no cover - depends on interpreter
+    try:
+        import tomli as _toml_strict  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        _toml_strict = None
+
 
 class ApplyError(Exception):
     pass
 
 
+def _valid_toml(data: bytes) -> bool:
+    """Return True when `data` is acceptable TOML for write-back.
+
+    Prefer a strict, complete parser (`tomllib`/`tomli`). When neither is
+    installed (Python <= 3.10 without `tomli`), fall back to the bundled
+    `tomlite`, which only implements a subset -- so a `tomlite` failure must
+    NOT be treated as invalid, otherwise legal TOML such as arrays
+    (`args = ["serve"]`) would be rejected.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if _toml_strict is not None:
+        try:
+            _toml_strict.loads(text)
+            return True
+        except Exception:
+            return False
+    try:
+        tomlite.loads(text)
+        return True
+    except Exception:
+        # tomlite is a subset parser; unknowns are treated as acceptable.
+        return True
+
+
 def validate(path: Path, data: bytes):
     """按扩展名做可解析性校验；失败抛 ApplyError。其他格式默认放行。"""
     name = Path(path).name.lower()
-    try:
-        if name.endswith(".json"):
+    if name.endswith(".json"):
+        try:
             json.loads(data.decode("utf-8"))
-        elif name.endswith(".toml"):
-            tomlite.loads(data.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, tomlite.TomlError) as exc:
-        raise ApplyError("内容校验失败 {}: {}".format(path, exc))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ApplyError("内容校验失败 {}: {}".format(path, exc))
+    elif name.endswith(".toml"):
+        if not _valid_toml(data):
+            raise ApplyError("内容校验失败 {}: 非法 TOML".format(path))
 
 
 def backup(path: Path, backup_root: Path, run_id: str, repo_path: str):

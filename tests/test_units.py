@@ -13,6 +13,27 @@ def silent(*_args):
     return None
 
 
+class ApplierValidateTest(unittest.TestCase):
+    def test_toml_with_array_is_accepted(self):
+        # legal TOML the bundled tomlite cannot parse (arrays) must not be rejected
+        path = Path("x/config.toml")
+        applier.validate(path, b'args = ["serve"]\n')
+
+    def test_invalid_toml_rejected_when_strict_parser_present(self):
+        from ai_config_sync import applier as a
+        if a._toml_strict is None:
+            self.skipTest("no strict TOML parser available")
+        with self.assertRaises(applier.ApplyError):
+            applier.validate(Path("x/config.toml"), b"key = = broken\n")
+
+    def test_invalid_json_rejected(self):
+        with self.assertRaises(applier.ApplyError):
+            applier.validate(Path("x/a.json"), b"{not valid")
+
+    def test_other_extensions_pass_through(self):
+        applier.validate(Path("x/notes.md"), b"\x00 anything \xff")
+
+
 class GitopsAuthTest(unittest.TestCase):
     def test_remote_publickey_rejection_is_auth(self):
         self.assertTrue(gitops.is_auth_error(

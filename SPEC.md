@@ -100,7 +100,7 @@
 3. fetch + merge origin/<branch>（仅快进/干净合并；真实冲突 → error-conflict，保留现场）
 4. 对 HEAD 中每个命中清单的 source/... 文件：
    - 本机内容已一致 → 跳过
-   - .json/.toml 格式校验失败 → 跳过并计入 skipped
+   - `.json` 格式校验失败 → 跳过并计入 skipped；`.toml` 见第 9 节校验规则
    - 写回前备份到 state/backups/<run_id>/<repo_path>，按 max_backups_per_file 修剪
    - 原子替换（保留既有 mode/uid/gid；新建 0644）
 5. 报告写回/跳过文件数
@@ -111,7 +111,7 @@
 
 ## 9. 写回契约（pull）
 
-1. **格式校验**：`.json` / `.toml` 按可解析性校验，失败跳过并计入 skipped；其他格式放行。
+1. **格式校验**：`.json` 按严格可解析性校验；`.toml` 优先用标准库 `tomllib`（Python 3.11+）或可选的 `tomli` 校验，两者都不可用时用自带 `tomlite` **宽松**校验——`tomlite` 只是子集解析器，其不支持的合法 TOML（如数组 `args = [...]`）**不得**当作校验失败。确证无法解析（如严格解析器报错）才跳过并计入 skipped；其他格式放行。
 2. **备份**：写回前把主机原文件复制到 `state/backups/<run_id>/<repo_path>`；每次写回后按 `max_backups_per_file` 修剪同一文件的历史备份（按 run_id 排序，0 = 不清理）。
 3. **原子替换**：同目录临时文件 + fsync + rename + 目录 fsync；保留既有 mode/uid/gid，新建文件 mode 0644。
 
