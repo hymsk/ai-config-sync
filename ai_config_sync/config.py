@@ -16,21 +16,14 @@ class ConfigError(Exception):
 
 @dataclass
 class Layout:
-    """Agent 自身目录布局（固定绝对路径；可注入以便隔离测试）。
-
-    唯一的 $HOME 依赖是冲突标记 flag（原始需求：产生在 ~ 目录下）。
-    """
+    """工具自身目录布局（固定绝对路径；可注入以便隔离测试）。"""
 
     etc: Path = DEFAULT_ETC
     var: Path = DEFAULT_VAR
-    flag: Path = None  # type: ignore[assignment]
 
     def __post_init__(self):
         self.etc = Path(self.etc)
         self.var = Path(self.var)
-        if self.flag is None:
-            self.flag = Path.home() / "ERROR_MERGE_FLAG"
-        self.flag = Path(self.flag)
 
     @property
     def bootstrap(self) -> Path:
@@ -49,10 +42,6 @@ class Layout:
         return self.state_dir / "backups"
 
     @property
-    def journal_path(self) -> Path:
-        return self.state_dir / "journal.jsonl"
-
-    @property
     def log_path(self) -> Path:
         return self.state_dir / "sync.log"
 
@@ -61,8 +50,8 @@ class Layout:
         return self.state_dir / "lock"
 
     def hard_zones(self, worktree, install_dir=""):
-        """硬排除前缀路径列表（含 flag 文件）。"""
-        zones = [self.etc, self.var, Path(worktree), self.flag]
+        """硬排除前缀路径列表。"""
+        zones = [self.etc, self.var, Path(worktree)]
         if install_dir:
             p = Path(install_dir)
             if str(p) not in ("", "/"):
@@ -114,8 +103,6 @@ def save_bootstrap(layout: Layout, boot: Bootstrap):
 
 @dataclass
 class RepoConfig:
-    interval: float = 5.0
-    remote_check_interval: float = 5.0
     max_backups_per_file: int = 20
     git_name: str = "sync-bot"
     git_email: str = "sync-bot@invalid"
@@ -131,20 +118,12 @@ def parse_repo_config(text: str) -> RepoConfig:
         raise ConfigError("config.toml: [git] 节格式错误")
     cfg = RepoConfig()
     try:
-        if "interval" in data:
-            cfg.interval = float(data["interval"])
-        if "remote_check_interval" in data:
-            cfg.remote_check_interval = float(data["remote_check_interval"])
-        else:
-            cfg.remote_check_interval = cfg.interval
         if "max_backups_per_file" in data:
             cfg.max_backups_per_file = int(data["max_backups_per_file"])
     except (TypeError, ValueError):
-        raise ConfigError("config.toml: interval 必须为数值")
+        raise ConfigError("config.toml: max_backups_per_file 必须为整数")
     cfg.git_name = str(git.get("name", cfg.git_name))
     cfg.git_email = str(git.get("email", cfg.git_email))
-    if cfg.interval <= 0 or cfg.remote_check_interval <= 0:
-        raise ConfigError("config.toml: interval 必须为正数")
     if cfg.max_backups_per_file < 0:
         raise ConfigError("config.toml: max_backups_per_file 不得为负（0=不清理）")
     return cfg

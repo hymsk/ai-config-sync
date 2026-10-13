@@ -27,10 +27,9 @@ def make_bare(tmpdir, name="origin.git"):
 
 
 def make_layout(tmpdir, name):
-    """独立机器布局：etc/var/flag 全部隔离在 tmpdir/name 下。"""
+    """独立机器布局：etc/var 全部隔离在 tmpdir/name 下。"""
     base = Path(tmpdir) / name
-    return Layout(etc=base / "etc", var=base / "var",
-                  flag=base / "home" / "ERROR_MERGE_FLAG")
+    return Layout(etc=base / "etc", var=base / "var")
 
 
 def boot_for(layout: Layout, remote, branch="main") -> Bootstrap:

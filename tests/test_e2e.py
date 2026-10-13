@@ -1,13 +1,16 @@
-"""端到端隔离测试：本地 bare 仓库作远端，注入式 Layout 模拟多机。"""
+"""端到端隔离测试：本地 bare 仓库作远端，注入式 Layout 模拟多机。
+
+覆盖两个手动单向操作：push（本机 → 仓库）与 pull（仓库 → 本机）。
+"""
 
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from ai_config_sync import adopt, gitops, installer
-from ai_config_sync.agent import Agent
-from ai_config_sync.config import Layout
+from ai_config_sync import gitops, installer
+from ai_config_sync.config import load_bootstrap
+from ai_config_sync.engine import Sync, SyncError
 
 from tests.helpers import boot_for, git, host_file, make_bare, make_layout, \
     manual_push
@@ -37,8 +40,8 @@ class E2E(unittest.TestCase):
         gitops.commit(self.layout1.default_worktree, "chore: manage test dir",
                       ("test-bot", "test-bot@invalid"))
         gitops.push(self.layout1.default_worktree, "main")
-        self.a1 = Agent(boot_for(self.layout1, self.remote), self.layout1,
-                        log=silent)
+        self.s1 = Sync(boot_for(self.layout1, self.remote), self.layout1,
+                       log=silent)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -48,235 +51,166 @@ class E2E(unittest.TestCase):
     def _m2(self):
         layout2 = make_layout(self.root, "m2")
         installer.install_attach(layout2, str(self.remote), log=silent)
-        return layout2, Agent(boot_for(layout2, self.remote), layout2,
-                              log=silent)
+        return layout2, Sync(boot_for(layout2, self.remote), layout2,
+                             log=silent)
 
     def _repo_blob(self, repo_path):
+        import shutil
         clone = self.root / "inspect"
         if clone.exists():
-            import shutil
             shutil.rmtree(clone)
         git(["clone", str(self.remote), str(clone)])
         return git(["show", "origin/main:" + repo_path], cwd=clone)
 
-    def _stop_after(self, phase):
-        """AICS_STOP_AFTER 环境变量上下文（测试钩子）。"""
-        old = os.environ.get("AICS_STOP_AFTER")
+    # ---------- push：本机 → 仓库 ----------
 
-        class _Ctx:
-            def __enter__(self):
-                os.environ["AICS_STOP_AFTER"] = phase
-
-            def __exit__(self, *args):
-                if old is None:
-                    os.environ.pop("AICS_STOP_AFTER", None)
-                else:
-                    os.environ["AICS_STOP_AFTER"] = old
-        return _Ctx()
-
-    # ---------- 基础同步 ----------
-
-    def test_capture_and_push(self):
+    def test_push_archives_and_pushes(self):
         f = host_file(self.host, "conf/app.json", '{"a": 1}\n')
-        status, _ = self.a1.run_once()
+        status, _ = self.s1.push()
         self.assertEqual(status, "ok")
-        self.assertEqual(
-            self._repo_blob("source" + str(f)), '{"a": 1}\n')
+        self.assertEqual(self._repo_blob("source" + str(f)), '{"a": 1}\n')
 
-    def test_remote_change_applied_with_backup(self):
+    def test_push_local_edit_pushed(self):
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        f.write_text("v1\n")
+        status, _ = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertEqual(self._repo_blob("source" + str(f)), "v1\n")
+
+    def test_push_does_not_delete_repo_files(self):
+        """本机缺失、仓库有的文件在 push 下不被删除。"""
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        f.unlink()
+        status, _ = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertEqual(self._repo_blob("source" + str(f)), "v0\n")
+
+    def test_push_when_clean_reports_noop(self):
+        host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        status, msg = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertIn("0 个文件", msg)
+
+    def test_push_rejects_dirty_worktree(self):
+        wt = self.layout1.default_worktree
+        (wt / "leftover.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaises(SyncError) as cm:
+            self.s1.push()
+        self.assertEqual(cm.exception.status, "error-dirty")
+
+    def test_push_unstable_file_skipped(self):
+        from unittest import mock
+        host_file(self.host, "conf/a.txt", "v0\n")
+        with mock.patch("ai_config_sync.collector.read_stable",
+                        return_value=None):
+            status, msg = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertIn("未稳定", msg)
+
+    def test_push_nonff_retry(self):
+        f = host_file(self.host, "m1/a.txt", "one\n")
+        # 其他机器抢先推送了另一个文件（触发 non-FF）
+        manual_push(self.remote, self.root / "other",
+                    [("source" + str(self.host / "m2/b.txt"), "two\n")],
+                    "other machine")
+        status, _ = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertEqual(self._repo_blob("source" + str(f)), "one\n")
+        self.assertEqual(
+            self._repo_blob("source" + str(self.host / "m2/b.txt")), "two\n")
+
+    def test_push_symlink_skipped(self):
+        f = host_file(self.host, "conf/real.txt", "real\n")
+        link = self.host / "conf" / "link.txt"
+        os.symlink(str(f), str(link))
+        status, _ = self.s1.push()
+        self.assertEqual(status, "ok")
+        self.assertEqual(self._repo_blob("source" + str(f)), "real\n")
+        # 软链接未被归档：远端该路径不存在
+        import shutil
+        clone = self.root / "inspect2"
+        shutil.rmtree(clone, ignore_errors=True)
+        git(["clone", str(self.remote), str(clone)])
+        listing = git(["ls-tree", "-r", "--name-only", "origin/main"], cwd=clone)
+        self.assertNotIn("source" + str(link), listing)
+
+    # ---------- pull：仓库 → 本机 ----------
+
+    def test_pull_writes_remote_change_with_backup(self):
         f = host_file(self.host, "conf/app.json", '{"a": 1}\n')
-        self.assertEqual(self.a1.run_once()[0], "ok")
+        self.assertEqual(self.s1.push()[0], "ok")
         manual_push(self.remote, self.root / "other",
                     [("source" + str(f), '{"a": 2}\n')], "other machine edit")
-        self.a1._last_fetch = 0.0  # 强制本轮执行远端检查
-        status, _ = self.a1.run_once()
+        status, _ = self.s1.pull()
         self.assertEqual(status, "ok")
         self.assertEqual(f.read_text(), '{"a": 2}\n')
         backups = list(self.layout1.backups_dir.rglob("app.json"))
         self.assertTrue(backups)
         self.assertEqual(backups[0].read_text(), '{"a": 1}\n')
 
-    def test_local_edit_pushed_next_round(self):
+    def test_pull_recreates_missing_file(self):
         f = host_file(self.host, "conf/a.txt", "v0\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        f.write_text("v1\n")
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "ok")
-        self.assertEqual(self._repo_blob("source" + str(f)), "v1\n")
-
-    def test_delete_recreated_from_repo(self):
-        f = host_file(self.host, "conf/a.txt", "v0\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
+        self.assertEqual(self.s1.push()[0], "ok")
         f.unlink()
-        status, _ = self.a1.run_once()
+        status, _ = self.s1.pull()
         self.assertEqual(status, "ok")
         self.assertEqual(f.read_text(), "v0\n")
 
-    def test_idle_when_no_changes(self):
-        host_file(self.host, "conf/a.txt", "v0\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        self.a1._last_fetch = 0.0  # 强制到达远端检查路径
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        self.assertEqual(self.a1.run_once()[0], "idle")
-
-    # ---------- 冲突与恢复 ----------
-
-    def test_conflict_flow_with_manual_resolution(self):
-        f = host_file(self.host, "conf/a.txt", "v0\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
-
-        # m1：本机提交未推送（stop after captured）
-        f.write_text("v1-local\n")
-        with self._stop_after("captured"):
-            self.assertEqual(self.a1.run_once()[0], "stopped-captured")
-
-        # 另一台服务器推送了不同修改
-        _, a2 = self._m2()
-        f.write_text("v2-remote\n")
-        self.assertEqual(a2.run_once()[0], "ok")
-
-        # m1 恢复：merge 冲突 → 暂停 + 标记 + 现场保留
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "paused-conflict")
-        self.assertTrue(self.layout1.flag.exists())
-        wt = self.layout1.default_worktree
-        self.assertIn("source" + str(f), gitops.unmerged_paths(wt))
-        self.assertEqual(f.read_text(), "v2-remote\n")  # 主机未被污染
-
-        # 只删标记不解决 → 重新置标记
-        self.layout1.flag.unlink()
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "paused-conflict")
-        self.assertTrue(self.layout1.flag.exists())
-
-        # 人工解决：仓库版 ours / 本机版 theirs
-        resolved = self.layout1.default_worktree / ("source" + str(f))
-        resolved.write_text("resolved\n")
-        git(["add", "source" + str(f)], cwd=wt)
-        git(["commit", "--no-edit"], cwd=wt)
-        self.layout1.flag.unlink()
-
-        # 冲突后恢复：主机仍是 v2-remote（=冲突时记录值）→ 写回解决结果
-        status, _ = self.a1.run_once()
+    def test_pull_does_not_delete_local_files(self):
+        """本机独有、仓库没有的文件在 pull 下保留。"""
+        host_file(self.host, "conf/keep.txt", "keep\n")
+        status, _ = self.s1.pull()
         self.assertEqual(status, "ok")
-        self.assertEqual(f.read_text(), "resolved\n")
+        self.assertTrue((self.host / "conf" / "keep.txt").is_file())
 
-        # 下一轮推送解决提交
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        self.assertEqual(self._repo_blob("source" + str(f)), "resolved\n")
+    def test_pull_invalid_json_skipped(self):
+        f = self.host / "conf/bad.json"
+        manual_push(self.remote, self.root / "other",
+                    [("source" + str(f), "{not valid json")], "bad json")
+        status, msg = self.s1.pull()
+        self.assertEqual(status, "ok")
+        self.assertIn("跳过", msg)
+        self.assertFalse(f.exists())
 
-    def test_same_file_dual_edit_forces_conflict(self):
-        """双侧改同一文件的不同区域：即使行级可自动融合也必须强制冲突。
+    def test_pull_same_content_no_write(self):
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        mtime = f.stat().st_mtime_ns
+        status, msg = self.s1.pull()
+        self.assertEqual(status, "ok")
+        self.assertIn("已一致 1", msg)
+        self.assertEqual(f.stat().st_mtime_ns, mtime)
 
-        没有 merge driver 时 git 会静默融合两侧改动（本用例在修复前
-        表现为 ok），这里锁定强制人工的行为。
-        """
+    # ---------- 双机单向协作 ----------
+
+    def test_two_hosts_push_then_pull(self):
+        f = host_file(self.host, "conf/a.txt", "from-m1\n")
+        self.assertEqual(self.s1.push()[0], "ok")
+        layout2, s2 = self._m2()
+        # m2 的清单来自仓库（继承 host 目录），pull 后得到 m1 的内容
+        status, _ = s2.pull()
+        self.assertEqual(status, "ok")
+        # m2 上同一 host 路径即同一绝对路径（多机共用清单）
+        self.assertEqual(f.read_text(), "from-m1\n")
+
+    def test_conflict_forces_manual(self):
+        """同一文件双侧修改：merge driver 强制冲突，保留现场。"""
         f = host_file(self.host, "conf/r.txt",
                       "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        # 远端改尾部，本机改头部：区域不重叠
+        self.assertEqual(self.s1.push()[0], "ok")
         manual_push(self.remote, self.root / "other",
                     [("source" + str(f),
                       "l1\nl2\nl3\nl4\nl5\nl6\nl7\nL8-REMOTE\n")],
                     "remote tail edit")
         f.write_text("L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
-        self.a1._last_fetch = 0.0
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "paused-conflict")
-        self.assertTrue(self.layout1.flag.exists())
+        with self.assertRaises(SyncError) as cm:
+            self.s1.push()
+        self.assertEqual(cm.exception.status, "error-conflict")
         wt = self.layout1.default_worktree
-        self.assertIn("source" + str(f), gitops.unmerged_paths(wt))
-        self.assertEqual(f.read_text(), "L1-LOCAL\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n")
-
-    def test_midround_host_edit_not_overwritten(self):
-        f = host_file(self.host, "conf/a.txt", "v0\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(f), "v1-remote\n")], "remote edit")
-        self.a1._last_fetch = 0.0  # 强制本轮执行远端检查
-        with self._stop_after("pushed"):
-            self.assertEqual(self.a1.run_once()[0], "stopped-pushed")
-        # 写前复核窗口内本机被编辑
-        f.write_text("local-edit\n")
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "waiting-local-stable")
-        self.assertEqual(f.read_text(), "local-edit\n")
-        # 下一轮把本机修改收集并推送
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        self.assertEqual(self._repo_blob("source" + str(f)), "local-edit\n")
-
-    def test_journal_recovery_pushed(self):
-        f = self.host / "conf/new-file.txt"
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(f), "from-remote\n")], "new remote file")
-        with self._stop_after("pushed"):
-            self.assertEqual(self.a1.run_once()[0], "stopped-pushed")
-        self.assertFalse(f.exists())  # 尚未写回
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "ok")
-        self.assertEqual(f.read_text(), "from-remote\n")
-
-    # ---------- 双机并行 ----------
-
-    def test_nonff_race_different_files(self):
-        f1 = host_file(self.host, "m1/a.txt", "one\n")
-        with self._stop_after("captured"):
-            self.assertEqual(self.a1.run_once()[0], "stopped-captured")
-        # 其他机器抢先推送了另一个文件
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(self.host / "m2/b.txt"), "two\n")],
-                    "other machine")
-        status, _ = self.a1.run_once()  # 恢复：fetch+merge+push
-        self.assertEqual(status, "ok")
-        self.assertEqual(self._repo_blob("source" + str(f1)), "one\n")
-        self.assertEqual(
-            self._repo_blob("source" + str(self.host / "m2/b.txt")), "two\n")
-
-    # ---------- 首轮采用 ----------
-
-    def test_adopt_preview_and_prefer_repo(self):
-        f = self.host / "conf/g.json"
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(f), '{"g": 9}\n')], "repo side")
-        rows = dict((p, s) for s, p in adopt.preview(self.a1))
-        self.assertEqual(rows[str(f)], "repo-only")
-        status, _ = adopt.prefer_repo(self.a1)
-        self.assertIn(status, ("ok", "idle"))
-        self.assertEqual(f.read_text(), '{"g": 9}\n')
-
-    def test_adopt_prefer_local_overrides_repo(self):
-        f = host_file(self.host, "conf/k.txt", "host-version\n")
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(f), "repo-version\n")], "repo side")
-        status, _ = adopt.prefer_local(self.a1)
-        self.assertEqual(status, "ok")
-        self.assertEqual(self._repo_blob("source" + str(f)), "host-version\n")
-
-    def test_adopt_prefer_merge_conflict_then_resolve(self):
-        f = host_file(self.host, "conf/h.txt", "host-version\n")
-        manual_push(self.remote, self.root / "other",
-                    [("source" + str(f), "repo-version\n")], "repo side")
-        status, _ = adopt.prefer_merge(self.a1)
-        self.assertEqual(status, "paused-conflict")
-        self.assertTrue(self.layout1.flag.exists())
-        wt = self.layout1.default_worktree
-        # driver 强制冲突：工作树保留 ours（仓库版），两侧完整内容在 stage 2/3
-        content = (wt / ("source" + str(f))).read_text()
-        self.assertIn("repo-version", content)
-        self.assertEqual(
-            git(["show", ":2:source" + str(f)], cwd=wt), "repo-version\n")
-        self.assertEqual(
-            git(["show", ":3:source" + str(f)], cwd=wt), "host-version\n")
-        (wt / ("source" + str(f))).write_text("merged-result\n")
-        git(["add", "source" + str(f)], cwd=wt)
-        git(["commit", "--no-edit"], cwd=wt)
-        self.layout1.flag.unlink()
-        status, _ = self.a1.run_once()
-        self.assertEqual(status, "ok")
-        self.assertEqual(f.read_text(), "merged-result\n")
-        self.assertEqual(self.a1.run_once()[0], "ok")
-        self.assertEqual(self._repo_blob("source" + str(f)),
-                         "merged-result\n")
+        self.assertTrue(gitops.unmerged_paths(wt))
 
     # ---------- 字节保真 ----------
 
@@ -287,7 +221,7 @@ class E2E(unittest.TestCase):
         os.environ["GIT_CONFIG_GLOBAL"] = str(cfg)
         try:
             f = host_file(self.host, "conf/crlf.txt", "a\r\nb\r\n")
-            self.assertEqual(self.a1.run_once()[0], "ok")
+            self.assertEqual(self.s1.push()[0], "ok")
             self.assertEqual(self._repo_blob("source" + str(f)), "a\r\nb\r\n")
         finally:
             if old_global is None:
@@ -332,7 +266,6 @@ class E2E(unittest.TestCase):
 
     def test_attach_default_branch_resolution(self):
         layout, _ = self._m2()
-        from ai_config_sync.config import load_bootstrap
         boot = load_bootstrap(layout)
         self.assertEqual(boot.branch, "main")
 

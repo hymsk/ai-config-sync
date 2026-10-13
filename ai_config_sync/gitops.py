@@ -1,7 +1,7 @@
 """全部 Git 操作的唯一封装。
 
-不变量：不 rebase、不 force push、不 reset、不 clean；
-每条命令强制 core.autocrlf=false，保证字节级保真（Hash 对比前提）。
+不变量：不 rebase、不 force push、不 reset、不 clean；冲突保留现场；
+每条命令强制 core.autocrlf=false，保证字节级保真（哈希对比前提）。
 """
 
 import os
@@ -35,14 +35,12 @@ def _base_cmd(identity=None):
     return cmd
 
 
-def run_git(args, cwd=None, identity=None, timeout=GIT_TIMEOUT, check=True,
-            stdin_bytes=None):
+def run_git(args, cwd=None, identity=None, timeout=GIT_TIMEOUT, check=True):
     cmd = _base_cmd(identity) + [str(a) for a in args]
     try:
         proc = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
-            input=stdin_bytes,
             capture_output=True,
             timeout=timeout,
             env=dict(os.environ),
@@ -145,6 +143,14 @@ def fetch(wt):
     run_git(["fetch", "--prune", "origin"], cwd=wt)
 
 
+def merge(wt, ref):
+    # 命令行注入 driver 定义：同一文件双侧修改强制冲突，保留现场
+    rc, _, _ = run_git(
+        ["-c", MERGE_DRIVER + "=false", "merge", ref, "--no-edit"],
+        cwd=wt, check=False)
+    return rc
+
+
 def ensure_conflict_driver(wt):
     """幂等写入强制冲突 driver 的本地兜底定义。
 
@@ -152,7 +158,7 @@ def ensure_conflict_driver(wt):
       （种子尚未更新）也立即生效；
     - 本地 config 定义 driver：没有定义时 git 会静默回退到行级自动合并，
       该定义保证手工 git merge 同样受保护。
-    agent 自身的 merge 始终通过 -c 注入定义，不依赖这里的状态。
+    本工具的 merge 始终通过 -c 注入定义，不依赖这里的状态。
     """
     info = Path(wt) / ".git" / "info"
     info.mkdir(parents=True, exist_ok=True)
@@ -164,15 +170,6 @@ def ensure_conflict_driver(wt):
         with open(attrs, "a", encoding="utf-8") as f:
             f.write("".join(missing))
     run_git(["config", MERGE_DRIVER, "false"], cwd=wt)
-
-
-def merge(wt, ref, allow_unrelated=False):
-    # 命令行注入 driver 定义：不依赖本地 config 是否在位
-    args = ["-c", MERGE_DRIVER + "=false", "merge", ref, "--no-edit"]
-    if allow_unrelated:
-        args.append("--allow-unrelated-histories")
-    rc, _, _ = run_git(args, cwd=wt, check=False)
-    return rc
 
 
 def push(wt, branch, set_upstream=False):
@@ -191,59 +188,11 @@ def blob_at(wt, revision, path):
     return out
 
 
-def diff_names(wt, a, b):
-    _, out, _ = run_git(["diff", "--name-only", a, b], cwd=wt)
-    return [l for l in out.decode("utf-8", "replace").splitlines() if l.strip()]
-
-
 def ls_tree(wt, revision, prefix):
     """列出某提交下 prefix 目录中的文件（递归）。"""
     _, out, _ = run_git(
         ["ls-tree", "-r", "--name-only", revision, "--", prefix], cwd=wt)
     return [l for l in out.decode("utf-8", "replace").splitlines() if l.strip()]
-
-
-def hash_object(wt, data: bytes) -> str:
-    _, out, _ = run_git(["hash-object", "-w", "--stdin"], cwd=wt,
-                        stdin_bytes=data)
-    return out.decode().strip()
-
-
-def _run_env(args, wt, env, identity=None):
-    cmd = ["git", "-C", str(wt)] + _base_cmd(identity)[1:] + args
-    proc = subprocess.run(cmd, capture_output=True, env=env, timeout=GIT_TIMEOUT)
-    if proc.returncode != 0:
-        raise GitError(
-            "git 失败: {} | {}".format(" ".join(args[:3]),
-                                       proc.stderr.decode("utf-8", "replace")),
-            proc.stderr.decode("utf-8", "replace"))
-    return proc.returncode, proc.stdout, proc.stderr
-
-
-def write_temp_tree(wt, entries, tmp_index: str) -> str:
-    """用临时 index 构建 tree，返回 tree sha；不触碰工作树与真实 index。
-
-    entries: [(repo_path, blob_sha), ...]
-    """
-    env = dict(os.environ)
-    env["GIT_INDEX_FILE"] = tmp_index
-    if os.path.exists(tmp_index):
-        os.unlink(tmp_index)
-    try:
-        for path, sha in entries:
-            _run_env(["update-index", "--add", "--cacheinfo",
-                      "100644," + sha + "," + path], wt, env)
-        _, out, _ = _run_env(["write-tree"], wt, env)
-    finally:
-        if os.path.exists(tmp_index):
-            os.unlink(tmp_index)
-    return out.decode().strip()
-
-
-def commit_tree(wt, tree, message, identity) -> str:
-    _, out, _ = run_git(["commit-tree", tree, "-m", message], cwd=wt,
-                        identity=identity)
-    return out.decode().strip()
 
 
 def is_auth_error(stderr: str) -> bool:

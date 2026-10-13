@@ -1,16 +1,12 @@
-"""单元与回归测试：认证判定、备份修剪、首轮采用推送失败。"""
+"""单元与回归测试：认证判定、备份修剪、冲突 driver 幂等。"""
 
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from ai_config_sync import adopt, applier, gitops, installer
-from ai_config_sync.agent import Agent
-from ai_config_sync.config import Layout
-
-from tests.helpers import boot_for, host_file, make_bare, make_layout
+from ai_config_sync import applier, gitops
+from ai_config_sync.config import parse_repo_config, ConfigError
 
 
 def silent(*_args):
@@ -119,39 +115,22 @@ class ConflictDriverTest(unittest.TestCase):
         self.assertIn("source/** merge=aics-conflict", text)
 
 
-class AdoptPushFailureTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.remote = make_bare(self.root)
-        self.host = self.root / "host"
-        self.host.mkdir()
-        self.layout = make_layout(self.root, "m1")
-        installer.install_new(self.layout, str(self.remote), branch="main",
-                              log=silent)
-        list_path = (self.layout.default_worktree / ".sync-config"
-                     / "sync.list")
-        list_path.write_text("{}/**\n".format(self.host), encoding="utf-8")
-        gitops.add(self.layout.default_worktree, [".sync-config/sync.list"])
-        gitops.commit(self.layout.default_worktree, "chore: manage test dir",
-                      ("test-bot", "test-bot@invalid"))
-        gitops.push(self.layout.default_worktree, "main")
-        self.agent = Agent(boot_for(self.layout, self.remote), self.layout,
-                           log=silent)
+class RepoConfigTest(unittest.TestCase):
+    def test_repo_config_rejects_negative_backups(self):
+        with self.assertRaises(ConfigError):
+            parse_repo_config("max_backups_per_file = -1\n")
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def test_repo_config_defaults(self):
+        cfg = parse_repo_config('max_backups_per_file = 3\n[git]\n'
+                                'name = "x"\nemail = "y"\n')
+        self.assertEqual(cfg.max_backups_per_file, 3)
+        self.assertEqual(cfg.git_name, "x")
+        self.assertEqual(cfg.git_email, "y")
 
-    def test_prefer_merge_push_failure_returns_transient(self):
-        f = host_file(self.host, "conf/a.txt", "host-version\n")
-        err = gitops.GitError("git 失败(128): push",
-                              "fatal: unable to access: Could not resolve "
-                              "host")
-        with mock.patch.object(gitops, "push", side_effect=err):
-            status, _ = adopt.prefer_merge(self.agent)
-        self.assertEqual(status, "error-transient")
-        # 合并结果已在本地 HEAD，主机文件未被破坏
-        self.assertEqual(f.read_text(), "host-version\n")
+    def test_repo_config_ignores_legacy_intervals(self):
+        # interval/remote_check_interval 已随常驻模式移除，不再读取
+        cfg = parse_repo_config("interval = 5\nremote_check_interval = 5\n")
+        self.assertEqual(cfg.max_backups_per_file, 20)
 
 
 if __name__ == "__main__":

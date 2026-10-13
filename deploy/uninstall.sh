@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 保守卸载：默认只停用 systemd 服务并卸载 Python 包；
-# 数据目录（bootstrap、工作树、journal、备份、日志）默认保留，
+# 保守卸载：默认只卸载 Python 包；
+# 数据目录（bootstrap、工作树、备份、日志）默认保留，
 # 仅在显式传入 --purge-data 且交互确认后删除。
 set -euo pipefail
 
@@ -12,10 +12,13 @@ for arg in "$@"; do
   esac
 done
 
+# 仅为历史部署清理：旧版本可能注册过 systemd 常驻服务
 UNIT=/etc/systemd/system/ai-config-sync.service
 if [ -e "$UNIT" ] || systemctl list-unit-files ai-config-sync.service >/dev/null 2>&1; then
   systemctl disable --now ai-config-sync 2>/dev/null || true
-  echo "已停用并禁用 ai-config-sync 服务（单元文件保留，可手动删除 $UNIT）"
+  rm -f "$UNIT"
+  systemctl daemon-reload 2>/dev/null || true
+  echo "已清理遗留的 systemd 单元 $UNIT"
 fi
 
 if python3 -m pip show ai-config-sync >/dev/null 2>&1; then
@@ -27,7 +30,7 @@ if [ "$PURGE_DATA" -ne 1 ]; then
   cat <<'EOF'
 数据目录已保留：
   /etc/ai-config-sync/        # bootstrap（重新绑定需先删除）
-  /var/lib/ai-config-sync/    # 工作树（可能有未推送提交）、journal、backups/、日志
+  /var/lib/ai-config-sync/    # 工作树（可能有未推送提交）、backups/、日志
 确认不再需要后执行: bash deploy/uninstall.sh --purge-data
 EOF
   exit 0

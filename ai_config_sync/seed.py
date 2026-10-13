@@ -5,11 +5,7 @@
 
 CONFIG_TOML = """\
 # ai-config-sync 运行配置（部署后以本仓库为准）
-# interval: 本机检查间隔（秒）
-interval = 5
-# remote_check_interval: 无本机变化时的远端检查间隔（秒）
-remote_check_interval = 5
-# max_backups_per_file: 写回前每个文件保留的历史备份份数（0=不清理）
+# max_backups_per_file: pull 写回前每个文件保留的历史备份份数（0=不清理）
 max_backups_per_file = 20
 
 [git]
@@ -36,14 +32,17 @@ GITATTRIBUTES = (
 )
 
 README = """\
-# ai-shared-config
+# ai-config-stor
 
-ai-config-sync 配置仓库。
+ai-config-sync 配置仓库（手动单向归档）。
 
 - `.sync-config/`：运行配置与纳入清单（不下发到主机）
 - `source/`：受管文件，路径对应主机绝对路径（/a/b/c <-> source/a/b/c）
 
-冲突处理：在 Agent 工作树中解决冲突并提交后，删除 ~/ERROR_MERGE_FLAG 恢复同步。
+用法（在已安装本工具的机器上手动执行）：
+- `ai-config-sync push`：把本机受管文件归档到本仓库并推送
+- `ai-config-sync pull`：把本仓库受管文件写回本机（写前备份）
+
 凭据文件（token/私钥/API key 等）默认排除、不建议纳入；经所有者显式授权后可纳入，
 但明文凭据会进入 Git 历史并复制到每一个同步节点，请自行评估并准备轮换。
 """
