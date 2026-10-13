@@ -4,6 +4,10 @@ Version history is kept newest first. The repository is currently a private, unr
 
 ## Unreleased
 
+### Added
+
+- `update` command and pre-run self-update check: the version is tag-driven only (highest `vX.Y.Z` on the tool's remote via `ls-remote --tags`); updating fast-forwards the install repository to the tag (`--ff-only`, no merge/force/reset) and re-executes the running command. `push`/`pull` check automatically with a 5s timeout (failures warn but never block); manual `update` uses 60s. A diverged install repo is reported for manual handling; a non-git installation says it cannot self-update. Gate on the new `v0.3.0` tag.
+
 ### Changed
 
 - **No merging of any kind; mirror semantics.** Both `push` and `pull` now only ever fast-forward the local branch (`--ff-only`) to the remote. Divergence (local and remote each holding commits the other lacks) stops with `error-conflict`, preserving the scene for manual handling. The `aics-conflict` merge driver, merge-based integration, and the non-fast-forward auto-retry loop are all removed.

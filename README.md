@@ -62,9 +62,12 @@ ai-config-sync install attach <repo-url> [-b <branch>] [-p <path>]
 ```bash
 ai-config-sync push   # host -> repo: archive managed files, commit, push
 ai-config-sync pull   # repo -> host: back up, then write managed files back
+ai-config-sync update # self-update: fast-forward the install repo to the latest vX.Y.Z tag
 ```
 
-Both are one-shot and manually triggered. Each acquires an exclusive lock while running; a second instance fails immediately with exit code 3.
+Both sync operations are one-shot and manually triggered. Each acquires an exclusive lock while running; a second instance fails immediately with exit code 3.
+
+Before every `push`/`pull` the tool also runs a quick self-update check (5s timeout): it looks up the highest `vX.Y.Z` tag on the tool's own remote and, if newer than the running version, fast-forwards the install repository (`--ff-only`, no merge, no force) and re-executes the command so the new code takes effect immediately. A failed or unreachable check is only a warning — it never blocks the sync. `update` run manually does the same with a 60s timeout and reports the result; a non-git installation (e.g. a wheel) cannot self-update and says so explicitly.
 
 ### push (host -> repo)
 

@@ -68,9 +68,16 @@ ai-config-sync install attach <repo-url> [-b <branch>] [-p <path>]
 ```bash
 ai-config-sync push   # 本机 → 仓库：归档受管文件，提交并推送
 ai-config-sync pull   # 仓库 → 本机：备份后写回受管文件
+ai-config-sync update # 自更新：快进安装仓库到远端最新 vX.Y.Z tag
 ```
 
-两者都是一次性、手动触发。运行时持有独占锁；第二个实例立即失败，退出码 3。
+两个同步操作都是一次性、手动触发。运行时持有独占锁；第二个实例立即失败，退出码 3。
+
+每次 `push`/`pull` 执行前，工具还会做一次快速自更新检查（5s 超时）：查询工具自身
+远端的最高 `vX.Y.Z` tag，若比当前版本新，则把安装仓库快进到该 tag（`--ff-only`，
+无合并、无 force），并**重新执行当前命令**让新代码立即生效。检查失败或超时只输出
+警告，绝不阻塞同步。手动 `update` 做同样的事（60s 超时）并报告结果；非 git 检出
+安装（如 wheel）无法自更新，会明确提示。
 
 ### push（本机 → 仓库）
 

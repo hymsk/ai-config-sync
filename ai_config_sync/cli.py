@@ -1,19 +1,24 @@
-"""命令行入口：install / push / pull。
+"""命令行入口：install / push / pull / update。
 
-两种手动单向操作：
+两个手动单向操作 + 一个自更新命令：
 - push：本机受管文件 → 配置仓库（自动 commit + push）
 - pull：配置仓库受管文件 → 本机（写前备份、格式校验、原子替换）
-无常驻进程。
+- update：快进安装仓库到远端最新 tag
+push/pull 执行前自动做一次 update 检查（5s 超时，失败只警告不阻塞）；
+有更新则更新后重新执行命令（环境变量防循环）。无常驻进程。
 """
 
 import argparse
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 
-from . import __version__, gitops, installer
+from . import __version__, gitops, installer, updater
 from .config import ConfigError, Layout, load_bootstrap
 from .engine import Sync, SyncError
+
+NO_UPDATE_ENV = "AI_CONFIG_SYNC_NO_UPDATE"
 
 
 def _setup_log(layout: Layout):
@@ -32,6 +37,33 @@ def _sync(layout: Layout) -> Sync:
     boot = load_bootstrap(layout)
     logger = _setup_log(layout)
     return Sync(boot, layout, log=logger.info)
+
+
+def _install_dir_or_empty(layout: Layout) -> str:
+    try:
+        return load_bootstrap(layout).install_dir
+    except ConfigError:
+        return ""
+
+
+def _auto_update(logger):
+    """push/pull 前的自动更新检查（5s 超时）；失败只警告不阻塞。
+
+    有更新则更新安装仓库并替换进程重跑命令（新代码立即生效）。
+    """
+    install_dir = _install_dir_or_empty(Layout())
+    if not install_dir:
+        return  # 未安装或非 git 检出，无从更新
+    try:
+        updated, tag = updater.check_and_update(
+            install_dir, log=logger.info, timeout=5)
+    except updater.UpdateError as exc:
+        print("警告: {}".format(exc), file=sys.stderr)
+        return
+    if updated:
+        print("已更新到 {}，重新执行命令".format(tag))
+        cmd = [sys.executable, "-m", "ai_config_sync"] + sys.argv[1:]
+        updater.exec_self(cmd)
 
 
 def main(argv=None):
@@ -56,6 +88,7 @@ def main(argv=None):
 
     sub.add_parser("push", help="本机受管文件归档到配置仓库并推送")
     sub.add_parser("pull", help="配置仓库受管文件写回本机（写前备份）")
+    sub.add_parser("update", help="更新工具自身（快进到远端最新 tag）")
 
     args = parser.parse_args(argv)
     layout = Layout()
@@ -70,9 +103,9 @@ def main(argv=None):
                                       force=args.force, log=logger.info)
             else:
                 installer.install_attach(layout, args.repo_url,
-                                         branch=args.branch,
-                                         worktree=args.place,
-                                         log=logger.info)
+                                          branch=args.branch,
+                                          worktree=args.place,
+                                          log=logger.info)
         except (installer.InstallError, gitops.GitError) as exc:
             print("安装失败: {}".format(exc), file=sys.stderr)
             return 1
@@ -80,11 +113,34 @@ def main(argv=None):
               "ai-config-sync push（本机→仓库）或 pull（仓库→本机）")
         return 0
 
+    if args.cmd == "update":
+        logger = _setup_log(layout)
+        install_dir = _install_dir_or_empty(layout)
+        if not install_dir:
+            print("无法定位安装目录（bootstrap 缺失或非 git 检出安装）；"
+                  "请手动更新", file=sys.stderr)
+            return 1
+        try:
+            updated, tag = updater.check_and_update(
+                install_dir, log=logger.info, timeout=60)
+        except updater.UpdateError as exc:
+            print("更新失败: {}".format(exc), file=sys.stderr)
+            return 1
+        if updated:
+            print("ok 已更新到 {}（当前会话请重开或重新执行命令）".format(tag))
+        else:
+            print("ok 已是最新（v{}）".format(__version__))
+        return 0
+
     try:
         sync = _sync(layout)
     except ConfigError as exc:
         print("配置错误: {}".format(exc), file=sys.stderr)
         return 2
+
+    if os.environ.get(NO_UPDATE_ENV) != "1":
+        _auto_update(sync.log)
+        # exec_self 成功时不返回；失败（网络等）只已警告，继续执行本命令
 
     try:
         if args.cmd == "push":
