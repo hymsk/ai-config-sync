@@ -46,7 +46,7 @@ def _install_dir_or_empty(layout: Layout) -> str:
         return ""
 
 
-def _auto_update(logger):
+def _auto_update(log):
     """push/pull 前的自动更新检查（5s 超时）；失败只警告不阻塞。
 
     有更新则更新安装仓库并替换进程重跑命令（新代码立即生效）。
@@ -56,7 +56,7 @@ def _auto_update(logger):
         return  # 未安装或非 git 检出，无从更新
     try:
         updated, tag = updater.check_and_update(
-            install_dir, log=logger.info, timeout=5)
+            install_dir, log=log, timeout=5)
     except updater.UpdateError as exc:
         print("警告: {}".format(exc), file=sys.stderr)
         return
@@ -139,7 +139,8 @@ def main(argv=None):
         return 2
 
     if os.environ.get(NO_UPDATE_ENV) != "1":
-        _auto_update(sync.log)
+        logger = _setup_log(layout)
+        _auto_update(logger.info)
         # exec_self 成功时不返回；失败（网络等）只已警告，继续执行本命令
 
     try:
