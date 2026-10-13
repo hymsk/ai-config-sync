@@ -133,6 +133,18 @@ class StepCombinationTest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(cli.main(bad), 2)
 
+    def test_help_lists_all_combinations(self):
+        import contextlib
+        import io
+        from ai_config_sync import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                cli.main(["--help"])
+        text = buf.getvalue()
+        for combo in cli.ALLOWED:
+            self.assertIn(" ".join(combo), text)
+
 
 if __name__ == "__main__":
     unittest.main()

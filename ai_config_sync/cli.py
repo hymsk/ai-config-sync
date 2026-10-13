@@ -40,10 +40,10 @@ ALLOWED = (
 )
 
 STEP_HELP = {
-    "commit": "本机受管文件归档到本地 config（本地提交，不联网）",
-    "push": "把本地 config 的提交推送到远端（不重算主机文件）",
-    "sync": "把本地 config 的受管文件写回本机（写前备份，不联网）",
-    "pull": "把远端快进到本地 config（不碰主机文件）",
+    "commit": "本机受管文件归档到本地 config",
+    "push": "把本地 config 的提交推送到远端",
+    "sync": "把本地 config 的受管文件写回本机",
+    "pull": "把远端快进到本地 config",
 }
 
 
@@ -92,6 +92,15 @@ def _auto_update(log):
         updater.exec_self(cmd)
 
 
+# 每个原子步骤之后允许的下一步（用于 -h 提示与组合校验的说明）。
+NEXT_STEPS = {
+    "commit": ("push",),
+    "push": ("sync",),
+    "sync": (),
+    "pull": ("sync",),
+}
+
+
 def _add_operations(sub):
     """注册四个原子操作；其余步由各子命令的 rest 承接（按执行顺序）。
 
@@ -99,18 +108,33 @@ def _add_operations(sub):
     改为在 main 中用 ALLOWED 显式校验顺序与组合。
     """
     for name in STEPS:
-        p = sub.add_parser(name, help=STEP_HELP[name])
-        p.add_argument("rest", nargs="*",
-                       help="后续步骤（按执行顺序，如 commit push）")
+        nxt = NEXT_STEPS[name]
+        if nxt:
+            rest_help = "可选后续步骤: {}".format("/".join(nxt))
+        else:
+            rest_help = "无后续步骤"
+        p = sub.add_parser(name, help=STEP_HELP[name],
+                           description=STEP_HELP[name])
+        p.add_argument("rest", nargs="*", metavar="STEP", help=rest_help)
 
 
 def _combos_text():
     return "、".join(" ".join(c) for c in ALLOWED)
 
 
+def _epilog():
+    """顶层 -h 底部的组合总览（保留换行）。"""
+    lines = ["固定组合:"]
+    for combo in ALLOWED:
+        lines.append("  {}".format(" ".join(combo)))
+    return "\n".join(lines)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="ai-config-sync", description="配置单向归档工具（手动触发）")
+        prog="ai-config-sync",
+        epilog=_epilog(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version",
                         version="%(prog)s " + __version__)
     sub = parser.add_subparsers(dest="cmd", required=True)
