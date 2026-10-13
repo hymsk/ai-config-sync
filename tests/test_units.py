@@ -139,11 +139,48 @@ class StepCombinationTest(unittest.TestCase):
         from ai_config_sync import cli
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            with self.assertRaises(SystemExit):
-                cli.main(["--help"])
+            rc = cli.main(["--help"])
+        self.assertEqual(rc, 0)
         text = buf.getvalue()
         for combo in cli.ALLOWED:
             self.assertIn(" ".join(combo), text)
+
+    def test_no_args_prints_help_and_succeeds(self):
+        import contextlib
+        import io
+        from ai_config_sync import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main([])
+        self.assertEqual(rc, 0)
+        self.assertEqual(err.getvalue(), "")
+        self.assertIn("usage: ai-config-sync", out.getvalue())
+
+    def test_install_without_mode_is_usage_error(self):
+        import contextlib
+        import io
+        from ai_config_sync import cli
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(["install"])
+        self.assertEqual(rc, 2)
+        self.assertIn("new", err.getvalue())
+        self.assertIn("attach", err.getvalue())
+
+    def test_display_width_counts_cjk_as_two(self):
+        from ai_config_sync import cli
+        self.assertEqual(cli._display_width("commit"), 6)
+        self.assertEqual(cli._display_width("本机配置"), 8)
+        self.assertEqual(cli._display_width(cli._pad("本机配置", 10)), 10)
+
+    def test_action_table_columns_align(self):
+        from ai_config_sync import cli
+        lines = [l for l in cli._help_text().splitlines()
+                 if l.startswith("  ") and "(" in l and "->" in l]
+        self.assertEqual(len(lines), len(cli.ACTION_DESC))
+        # 三列起点按显示宽度对齐：描述列与流向列起点唯一
+        desc_cols = {cli._display_width(l[:l.index("(")]) for l in lines}
+        self.assertEqual(len(desc_cols), 1)
 
 
 if __name__ == "__main__":

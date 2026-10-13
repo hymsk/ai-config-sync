@@ -2,6 +2,17 @@
 
 Version history is kept newest first. The repository is a private baseline; no package has been published — releases are Git tags only.
 
+## 0.5.0
+
+### Added
+
+- **Friendly CLI help.** `ai-config-sync`, `-h` and `--help` print the same overview: an `action` table listing the four atomic steps plus the three combinations, each with a plain-language description and its data flow in a third column, followed by a `command` table (`install`/`update`). Columns are aligned by terminal display width (CJK counts as two). Steps, `install new`/`attach` and `update` gained descriptions in their own `-h`.
+
+### Changed
+
+- **No argument now prints help and exits 0** instead of argparse's `the following arguments are required: cmd`; an unknown action reports `未知操作或命令: ...` (the internal `dest` name is no longer exposed). `install` without a mode reports which modes exist instead of `required: mode`.
+- Help wording unified: **本机配置 / 本地仓库 / 远端仓库**, with arrows kept in the flow column; `update` is described as `更新工具`.
+
 ## 0.4.0
 
 ### Added
