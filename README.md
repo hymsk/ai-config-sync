@@ -151,7 +151,7 @@ Data directories are preserved by default; `bash deploy/uninstall.sh --purge-dat
 - Config files rewritten by their own application create sync feedback loops; do not include them.
 - All machines share one include list and one config; no per-machine variance.
 - Only regular files; symlinks are skipped with a warning.
-- Never put tokens/private keys in the config repository; a private repo is not a credential vault.
+- Credential files (tokens, private keys, API keys) are excluded by default and should not be included; the repository owner may explicitly authorize syncing them (a private repo is still not a credential vault — plaintext credentials enter Git history and are copied to every syncing host).
 
 ## Development and testing
 

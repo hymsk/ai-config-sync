@@ -7,8 +7,8 @@
 - 以 [SPEC.md](./SPEC.md) 为当前行为契约；实现、测试和文档必须与其一致，改行为先改 SPEC。
 - Git 操作永不 rebase、不 force push、不 reset、不 clean；每条命令强制 `core.autocrlf=false`，哈希对比以字节保真为前提。
 - 冲突只暂停本机：保留现场、置 `ERROR_MERGE_FLAG`，绝不自动解决或猜测；journal 损坏时进入 `paused-needs-doctor`。
-- Agent 自身目录（`/etc/ai-config-sync`、`/var/lib/ai-config-sync`、工作树、安装目录、flag）硬排除，任何清单规则不得把 Agent 自己同步出去；sync.list 也不得纳入凭据文件。
-- URL 内嵌凭据一律拒绝；不在仓库中记录密码、token、私钥等敏感信息。
+- Agent 自身目录（`/etc/ai-config-sync`、`/var/lib/ai-config-sync`、工作树、安装目录、flag）硬排除，任何清单规则不得把 Agent 自己同步出去；凭据文件默认排除，仅在仓库所有者显式授权且明确放行后才可纳入 sync.list（见 SPEC 第 2 节）。
+- URL 内嵌凭据一律拒绝；凭据文件默认不纳入清单，经所有者显式授权后放行则视为知情决定（明文凭据将进入 Git 历史并分发到所有同步节点）。
 - 不为未发布的旧路径、旧配置和旧行为增加兼容代码。
 
 ## 开发要求
