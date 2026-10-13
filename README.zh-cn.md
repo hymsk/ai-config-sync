@@ -2,19 +2,29 @@
 
 > 通过专用 Git 仓库，在 Linux 主机之间单向归档与还原配置文件。
 
-一个规则驱动的命令行工具，只有两个显式、手动触发的操作，无常驻进程、
-无自动双向收敛、**不做任何合并**：
+一个规则驱动的命令行工具，提供四个原子操作与三个固定组合，无常驻进程、
+无自动双向收敛、**不做任何合并**。每个原子步骤只做一件事：
 
-- `push`（本机 → 仓库）：把本机受管文件归档为配置仓库 `source/` 的精确镜像，
-  提交并推送。
-- `pull`（仓库 → 本机）：把配置仓库中的受管文件写回本机，写前备份、
-  格式校验、原子替换。
+- `commit`（本机文件 → 本地 config）：把本机受管文件镜像写入工作树并**本地提交**，不联网。
+- `push`（本地 config → 远端）：只把本地已有提交推送到远端，不重算主机文件。
+- `sync`（本地 config → 本机）：把本地 HEAD 的受管文件写回本机（写前备份、格式校验、
+  原子替换），不联网、**永不删除主机文件**。
+- `pull`（远端 → 本地 config）：`fetch` 远端并**仅快进**对齐本地分支，**不碰主机文件**。
+
+三个固定组合，按执行顺序书写（只接受这三种，`push commit` 等一律拒绝）：
+
+| 组合 | 数据流 | 等价 |
+|---|---|---|
+| `commit push` | 本机文件 → 远端 | 归档并推送（以文件为准） |
+| `push sync` | 本地 config → 远端 + 本机 | 以本地 git 为准 |
+| `pull sync` | 远端 → 本机 | 拉取并写回（以远端为准） |
 
 [English](README.md) · [规范](SPEC.md) · [版本记录](CHANGELOG.md)
 
 - 纯规则驱动，无 LLM、无外部 Python 依赖（Python >= 3.9，自带极简 TOML 解析）。
 - 全程不 rebase、不 force push、不 reset、不 clean、**不做三方合并**：
-  本地分支只允许 `--ff-only` 快进对齐远端；真分叉一律报错保留现场交人工。
+  只有 `pull` 会 `--ff-only` 快进本地分支；`push` 遇远端领先/分叉一律报错；
+  真分叉一律报错保留现场交人工。
 - 以文件为准：所有变更判定都是"主机文件 Hash <-> Git blob Hash"即时对比，
   不维护 per-file 状态文件。
 
@@ -66,59 +76,92 @@ ai-config-sync install attach <repo-url> [-b <branch>] [-p <path>]
 ## 使用
 
 ```bash
-ai-config-sync push   # 本机 → 仓库：归档受管文件，提交并推送
-ai-config-sync pull   # 仓库 → 本机：备份后写回受管文件
-ai-config-sync update # 自更新：快进安装仓库到远端最新 vX.Y.Z tag
+ai-config-sync commit       # 本机文件 → 本地 config（镜像写入 + 本地提交）
+ai-config-sync push         # 本地 config → 远端（只推送本地提交）
+ai-config-sync sync         # 本地 config → 本机（写回受管文件，写前备份）
+ai-config-sync pull         # 远端 → 本地 config（仅快进，不碰主机文件）
+ai-config-sync commit push  # 本机文件 → 远端（归档并推送）
+ai-config-sync push sync    # 本地 config → 远端 + 本机（以本地 git 为准）
+ai-config-sync pull sync    # 远端 → 本机（拉取并写回）
+ai-config-sync update       # 自更新：快进安装仓库到远端最新 vX.Y.Z tag
 ```
 
-两个同步操作都是一次性、手动触发。运行时持有独占锁；第二个实例立即失败，退出码 3。
+每个操作都是一次性、手动触发。一次调用（含组合）全程持有独占锁；
+第二个实例立即失败，退出码 3。
 
-每次 `push`/`pull` 执行前，工具还会做一次快速自更新检查（5s 超时）：查询工具自身
+每次同步操作前，工具还会做一次快速自更新检查（5s 超时）：查询工具自身
 远端的最高 `vX.Y.Z` tag，若比当前版本新，则把安装仓库快进到该 tag（`--ff-only`，
 无合并、无 force），并**重新执行当前命令**让新代码立即生效。检查失败或超时只输出
 警告，绝不阻塞同步。手动 `update` 做同样的事（60s 超时）并报告结果；非 git 检出
 安装（如 wheel）无法自更新，会明确提示。
 
-### push（本机 → 仓库）
+### commit（本机文件 → 本地 config）
 
 ```text
-1. 取独占锁
-2. fetch + 把本地分支**只快进**对齐远端（--ff-only，无任何合并；
-   真分叉 → error-conflict，保留现场交人工）
-3. 要求工作树干净（有未知改动 → error-dirty）
-4. 读取生效配置与清单展开（稳定读：两次 Hash 一致）
-5. 前缀检查：每条纳入规则的字面前缀必须存在于本机
+1. 确认当前分支即 bootstrap 分支
+2. 要求工作树干净（有未知改动 → error-dirty）
+3. 读取生效配置与清单展开（稳定读：两次 Hash 一致）
+4. 前缀检查：每条纳入规则的字面前缀必须存在于本机
    （显式列出的文件没了，或 /etc/xxx/** 的 /etc/xxx 整个不存在
     → error-missing：先改 sync.list 或恢复路径再重跑；
     目录里具体文件被删不算错——走镜像移除）
-6. 本机变更写入工作树 source/...
-7. 镜像移除：命中清单但本机已不存在的受管路径从仓库 git rm
-   （删除沿 push 方向传播）
-8. 提交（仅显式路径，不联网），然后 push（被拒=推送竞态 → 报错提示重跑，
-   不自动重试）
-9. 报告归档/移除文件数
+5. 本机变更写入工作树 source/...
+6. 镜像移除：命中清单但本机已不存在的受管路径从仓库 git rm
+7. 仅显式路径本地提交（不联网）；无变动则不造空提交
+8. 报告归档/移除文件数
 ```
 
-镜像语义：`push` 是"最后推送者获胜"。他机归档、而本机没有的文件，push 时
-会被**移除**；想保留请先 `pull` 再 `push`。同文件双侧修改**永不冲突**：
-本机内容直接覆盖远端（本地优先）；想接受远端版本，同样先 `pull`。
+`commit` 不联网、不改远端：只把本机文件镜像进本地工作树并落地本地提交；
+推送由 `push` 负责。
 
-### pull（仓库 → 本机）
+### push（本地 config → 远端）
 
 ```text
-1. 取独占锁
-2. fetch + 只快进对齐（规则同 push 第 2 步）
-3. 读取生效配置与清单展开（含"仓库有、清单命中、本机缺失"的路径——
-   这正是 pull 要重建的内容）
-4. 对 HEAD 中每个命中清单的 source/... 文件：
+1. 要求 bootstrap 分支；要求工作树干净
+2. fetch；比较本地 HEAD 与 origin/<branch>：
+   - 一致 → 无操作
+   - 本地落后（远端有本地没有的提交）→ error-conflict，不自动快进
+     （提示改用 pull / pull sync）
+   - 真分叉 → error-conflict，保留现场交人工
+   - 本地领先 → 继续
+3. 只推送本地已有提交（不重算主机文件）
+4. 被拒（non-FF 推送竞态）→ error-conflict，不自动重试
+5. 报告推送提交数
+```
+
+`push` 不读清单、不碰主机文件。与旧模型不同，拆分后"同文件双侧修改"
+**不再被本地覆盖**：若远端在你 commit 期间前进，push 会以 `error-conflict`
+（分叉）拒绝而非覆盖。想让本机内容胜出，先 `pull`，本地取舍后再 `commit push`；
+本机内容已是本地提交时，直接 `push sync` 即可。
+
+### sync（本地 config → 本机）
+
+```text
+1. 读取生效配置与清单展开（含"仓库有、清单命中、本机缺失"的路径——
+   这正是 sync 要重建的内容）
+2. 对 HEAD 中每个命中清单的 source/... 文件：
    - 本机内容已一致 → 跳过
    - .json/.toml 格式校验失败 → 跳过并计入 skipped
    - 写回前备份到 state/backups/<run_id>/<repo_path>，按配置修剪
    - 原子替换（保留既有 mode/uid/gid；新建 0644）
-5. 报告写回/跳过文件数
+3. 报告写回/跳过文件数
 ```
 
-删除不跨过 `pull`：仓库没有的路径，`pull` 永远不会从本机删除。
+`sync` 不联网、永不删除本机文件：仓库没有的路径本机保留不动。
+
+### pull（远端 → 本地 config）
+
+```text
+1. 要求 bootstrap 分支；要求工作树干净
+2. fetch；比较本地 HEAD 与 origin/<branch>：
+   - 一致 → 无操作
+   - 本地领先（有未推送提交）→ 无操作
+   - 本地落后 → 仅快进（--ff-only，无三方合并）
+   - 真分叉 → error-conflict，保留现场交人工
+3. 报告是否快进
+```
+
+`pull` 不碰主机文件；落地由 `sync` 负责，正是组合 `pull sync` 所做的事。
 
 ## sync.list 语法
 
@@ -135,7 +178,7 @@ ai-config-sync update # 自更新：快进安装仓库到远端最新 vX.Y.Z tag
 配置仓库中的 `.sync-config/config.toml`（对所有机器生效）：
 
 ```toml
-max_backups_per_file = 20     # pull 写回前每个文件保留的历史备份份数（0=不清理）
+max_backups_per_file = 20     # sync 写回前每个文件保留的历史备份份数（0=不清理）
 
 [git]
 name = "sync-bot"
@@ -144,21 +187,25 @@ email = "sync-bot@invalid"
 
 ## 冲突处理
 
-没有合并引擎：`push`/`pull` 对本地分支只做 `--ff-only` 快进。由此：
+没有合并引擎：只有 `pull` 对本地分支做 `--ff-only` 快进，`push` 在远端领先
+或分叉时直接拒绝。由此：
 
-- **同文件双侧修改** —— `push` 不可能冲突：操作是镜像，本机内容直接覆盖
-  远端（本地优先）。想接受远端版本，先执行 `pull`。
+- **同文件双侧修改** —— 拆分后 `commit push` **不再**静默覆盖远端：若远端在你
+  commit 期间前进，`push` 会以 `error-conflict`（分叉）停止。想让本机内容胜出：
+  先 `pull`，本地取舍后再 `commit push`；本机内容已是本地提交时，直接 `push sync`。
 - **分支分叉**（本地与远端各有对方没有的提交，通常是有人在 worktree 手工
   提交）—— `push`/`pull` 以 `error-conflict` 停止并保留现场，交人工：
 
 ```bash
 cd /var/lib/ai-config-sync/repo
 git log --oneline --graph --all          # 查看分叉情况
-# 要么手工推送本地提交，要么有意丢弃之，然后重跑 ai-config-sync push / pull
+# 要么手工推送本地提交，要么有意丢弃之，然后重跑 ai-config-sync push / pull sync
 ```
 
 - **推送被拒（non-fast-forward）** —— 另一台机器恰好在你的 fetch 与 push
   之间推了内容。重跑命令即可：会重新对齐并再次归档。
+- **push 时本地落后** —— 远端有本地没有的提交（例如你只 `commit` 而没先 `pull`）。
+  `push` 以 `error-conflict` 拒绝并提示 `pull` / `pull sync`，绝不自动快进。
 
 ## 卸载
 
@@ -173,14 +220,16 @@ bash deploy/uninstall.sh --purge-data
 
 ## 已知边界
 
-- 删除只沿 push 方向传播（镜像移除）；`pull` 永不删除本机文件。
-- 多机镜像语义：最后推送者获胜；想保留他机归档的文件，先 `pull` 再 `push`。
+- 删除只沿 `commit` 方向传播（镜像移除）；`sync` 永不删除本机文件。
+- `sync` 不感知远端、`pull` 不感知主机文件：`pull sync` 才是"以远端为准"的完整写回；
+  `push` 不重算主机文件、`sync` 不联网：`push sync` 才是"以本地 git 为准"。
+- 多机镜像语义：`commit push` 最后推送者获胜；想保留他机归档的文件，先 `pull sync` 再 `commit push`。
 - 应用自身会重写的配置文件会造成归档回流，不要纳入清单。
 - 所有机器共用同一份清单与配置（无机器差异）。
 - 只处理普通文件；软链接跳过并告警。
 - 无常驻进程、无任何合并、无崩溃恢复 journal、无冲突暂停标记。
 - 凭据文件（token/私钥/API key 等）默认排除、不建议纳入；仓库所有者可显式授权同步
-  （私有仓库不是凭据保险箱：明文凭据会进入 Git 历史并复制到每一个 pull 的主机）。
+  （私有仓库不是凭据保险箱：明文凭据会进入 Git 历史并复制到每一个 pull sync 的主机）。
 
 ## 开发与测试
 
@@ -189,8 +238,9 @@ python3 -m pip install -e .
 python3 -m unittest discover -s tests -t . -v
 ```
 
-测试使用本地 bare 仓库模拟远端，覆盖：清单匹配与硬排除、`push` 归档与推送、
-镜像移除、清单前缀缺失报错、快进对齐与分叉报错、`pull` 写回与备份、
+测试使用本地 bare 仓库模拟远端，覆盖：清单匹配与硬排除、`commit` 本地归档与镜像移除、
+`push` 推送与远端领先/分叉拒绝、`sync` 写回与备份、`pull` 仅快进与分叉拒绝、
+组合 `commit push` / `push sync` / `pull sync`、异常组合拒绝、清单前缀缺失报错、
 格式校验跳过、软链接跳过、CRLF 字节保真、安装分支规则（含 `--force`
 孤儿分支与 attach 默认分支）、认证判定边界、备份修剪。
 

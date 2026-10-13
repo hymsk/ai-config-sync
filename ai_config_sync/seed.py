@@ -37,8 +37,9 @@ ai-config-sync 配置仓库（手动单向归档）。
 - `source/`：受管文件，路径对应主机绝对路径（/a/b/c <-> source/a/b/c）
 
 用法（在已安装本工具的机器上手动执行）：
-- `ai-config-sync push`：把本机受管文件归档到本仓库并推送
-- `ai-config-sync pull`：把本仓库受管文件写回本机（写前备份）
+- `ai-config-sync commit push`：把本机受管文件归档到本仓库并推送
+- `ai-config-sync push sync`：以本地 config 为准（推送本地提交并写回本机）
+- `ai-config-sync pull sync`：拉取远端并写回本机（写前备份）
 
 凭据文件（token/私钥/API key 等）默认排除、不建议纳入；经所有者显式授权后可纳入，
 但明文凭据会进入 Git 历史并复制到每一个同步节点，请自行评估并准备轮换。

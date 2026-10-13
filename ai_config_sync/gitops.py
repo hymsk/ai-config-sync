@@ -111,6 +111,27 @@ def staged_exists(wt) -> bool:
     return rc == 1
 
 
+def add_all(wt):
+    """暂存工作树全部改动（含未跟踪文件）：commit 命令的显式例外。
+
+    push/pull 只提交显式收集/移除的路径；commit 以本地 git 为准，
+    故明确暂存一切（删除与新增一并纳入）。
+    """
+    run_git(["add", "-A"], cwd=wt)
+
+
+def staged_paths(wt):
+    """已暂存的仓库相对路径（--name-only，NUL 分隔以保真奇怪文件名）。"""
+    _, out, _ = run_git(["diff", "--cached", "--name-only", "-z"], cwd=wt)
+    return [p for p in out.decode("utf-8", "replace").split("\0") if p]
+
+
+def count_commits(wt, rev_range):
+    """rev_range（如 a..b）内的提交数。"""
+    _, out, _ = run_git(["rev-list", "--count", rev_range], cwd=wt)
+    return int(out.decode().strip() or "0")
+
+
 def commit(wt, message, identity):
     run_git(["commit", "-m", message], cwd=wt, identity=identity)
 

@@ -1,12 +1,31 @@
 # Changelog
 
-Version history is kept newest first. The repository is currently a private, unreleased baseline; no package has been published and no tag exists unless stated otherwise.
+Version history is kept newest first. The repository is a private baseline; no package has been published — releases are Git tags only.
 
-## Unreleased
+## 0.4.0
 
 ### Added
 
-- `update` command and pre-run self-update check: the version is tag-driven only (highest `vX.Y.Z` on the tool's remote via `ls-remote --tags`); updating fast-forwards the install repository to the tag (`--ff-only`, no merge/force/reset) and re-executes the running command. `push`/`pull` check automatically with a 5s timeout (failures warn but never block); manual `update` uses 60s. A diverged install repo is reported for manual handling; a non-git installation says it cannot self-update. Gate on the new `v0.3.0` tag.
+- **Orthogonal four-step model with fixed combinations.** The CLI now exposes four atomic steps, each doing exactly one thing:
+  - `commit` (host files -> local config): mirror managed files into the worktree and make a local commit; offline.
+  - `push` (local config -> remote): push local commits only; never recompute host files.
+  - `sync` (local config -> host): write HEAD's managed files back to the host, with a pre-write backup, format validation and atomic replace; offline and never deletes host files.
+  - `pull` (remote -> local config): fetch + fast-forward-only align; never touches host files.
+
+  Only three combinations are accepted, written in execution order: `commit push` (host files -> remote), `push sync` (local-git truth) and `pull sync` (remote -> host). Abnormal sequences such as `push commit` are rejected with exit code 2. Every call holds `state/lock` for its whole run. These combinations replace the previous all-in-one `push`/`pull` semantics.
+
+### Changed
+
+- **`push` no longer recomputes host files, and the same-file-both-sides behavior changed.** In the split model `push` only pushes local commits and refuses when the remote is ahead or diverged (`error-conflict`) — it never fast-forwards. The old all-in-one `push` is gone, so a file modified on both sides is no longer silently overwritten by local content: you must `pull`, reconcile locally, then `commit push` (or `push sync` when the local content is already a commit).
+- **Mirror removal and the prefix check moved from `push` to `commit`.** Managed paths that no longer exist on this host are `git rm`'ed during `commit` (the local mirror step), and every include rule's literal prefix must exist on this host at `commit` time (`error-missing`). `sync` performs neither.
+- **`pull` no longer writes back and `sync` no longer fetches.** `pull` is fetch + `--ff-only` align only; `sync` is write-back only (pre-write backup, format validation, atomic replace, never deletes host files). `pull sync` is the combined write-back.
+- Version bumped to 0.4.0.
+
+## 0.3.0
+
+### Added
+
+- `update` command and pre-run self-update check: the version is tag-driven only (highest `vX.Y.Z` on the tool's remote via `ls-remote --tags`); updating fast-forwards the install repository to the tag (`--ff-only`, no merge/force/reset) and re-executes the running command. `push`/`pull` check automatically with a 5s timeout (failures warn but never block); manual `update` uses 60s. A diverged install repo is reported for manual handling; a non-git installation says it cannot self-update.
 
 ### Changed
 

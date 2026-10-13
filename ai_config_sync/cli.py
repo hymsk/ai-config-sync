@@ -1,10 +1,16 @@
-"""命令行入口：install / push / pull / update。
+"""命令行入口：install / commit / push / sync / pull / update。
 
-两个手动单向操作 + 一个自更新命令：
-- push：本机受管文件 → 配置仓库（自动 commit + push）
-- pull：配置仓库受管文件 → 本机（写前备份、格式校验、原子替换）
-- update：快进安装仓库到远端最新 tag
-push/pull 执行前自动做一次 update 检查（5s 超时，失败只警告不阻塞）；
+四个原子操作（各只做一件事）与三个固定组合：
+- commit：本机受管文件 → 本地 config（归档 + 本地提交；不联网）
+- push：  本地 config → 远端（只推送本地提交）
+- sync：  本地 config → 本机（写回受管文件；不联网、永不删主机文件）
+- pull：  远端 → 本地 config（fetch + 仅快进；不碰主机文件）
+- commit push：本机文件 → 远端（= 归档并推送）
+- push sync：  本地 config → 远端 + 本机（以本地 git 为准）
+- pull sync：  远端 → 本机（= 拉取并写回）
+
+操作按执行顺序书写；只接受上述固定组合，拒绝 `push commit` 等异常语义。
+同步操作执行前自动做一次 update 检查（5s 超时，失败只警告不阻塞）；
 有更新则更新后重新执行命令（环境变量防循环）。无常驻进程。
 """
 
@@ -19,6 +25,26 @@ from .config import ConfigError, Layout, load_bootstrap
 from .engine import Sync, SyncError
 
 NO_UPDATE_ENV = "AI_CONFIG_SYNC_NO_UPDATE"
+
+STEPS = ("commit", "push", "sync", "pull")
+
+# 仅接受这些步序列（元组），其余（如 push commit）一律报错。
+ALLOWED = (
+    ("commit",),
+    ("push",),
+    ("sync",),
+    ("pull",),
+    ("commit", "push"),
+    ("push", "sync"),
+    ("pull", "sync"),
+)
+
+STEP_HELP = {
+    "commit": "本机受管文件归档到本地 config（本地提交，不联网）",
+    "push": "把本地 config 的提交推送到远端（不重算主机文件）",
+    "sync": "把本地 config 的受管文件写回本机（写前备份，不联网）",
+    "pull": "把远端快进到本地 config（不碰主机文件）",
+}
 
 
 def _setup_log(layout: Layout):
@@ -47,7 +73,7 @@ def _install_dir_or_empty(layout: Layout) -> str:
 
 
 def _auto_update(log):
-    """push/pull 前的自动更新检查（5s 超时）；失败只警告不阻塞。
+    """同步操作前的自动更新检查（5s 超时）；失败只警告不阻塞。
 
     有更新则更新安装仓库并替换进程重跑命令（新代码立即生效）。
     """
@@ -64,6 +90,22 @@ def _auto_update(log):
         print("已更新到 {}，重新执行命令".format(tag))
         cmd = [sys.executable, "-m", "ai_config_sync"] + sys.argv[1:]
         updater.exec_self(cmd)
+
+
+def _add_operations(sub):
+    """注册四个原子操作；其余步由各子命令的 rest 承接（按执行顺序）。
+
+    不用 argparse 的 choices（nargs='*' 会把空列表也当非法值），
+    改为在 main 中用 ALLOWED 显式校验顺序与组合。
+    """
+    for name in STEPS:
+        p = sub.add_parser(name, help=STEP_HELP[name])
+        p.add_argument("rest", nargs="*",
+                       help="后续步骤（按执行顺序，如 commit push）")
+
+
+def _combos_text():
+    return "、".join(" ".join(c) for c in ALLOWED)
 
 
 def main(argv=None):
@@ -86,8 +128,7 @@ def main(argv=None):
             p.add_argument("--force", action="store_true",
                            help="非空仓库中于孤儿分支播种（纯新增 ref）")
 
-    sub.add_parser("push", help="本机受管文件归档到配置仓库并推送")
-    sub.add_parser("pull", help="配置仓库受管文件写回本机（写前备份）")
+    _add_operations(sub)
     sub.add_parser("update", help="更新工具自身（快进到远端最新 tag）")
 
     args = parser.parse_args(argv)
@@ -110,7 +151,8 @@ def main(argv=None):
             print("安装失败: {}".format(exc), file=sys.stderr)
             return 1
         print("下一步: 编辑 .sync-config/sync.list 后执行 "
-              "ai-config-sync push（本机→仓库）或 pull（仓库→本机）")
+              "ai-config-sync commit push（本机→远端）"
+              "或 pull sync（远端→本机）")
         return 0
 
     if args.cmd == "update":
@@ -132,6 +174,12 @@ def main(argv=None):
             print("ok 已是最新（v{}）".format(__version__))
         return 0
 
+    steps = (args.cmd,) + tuple(args.rest)
+    if steps not in ALLOWED:
+        print("不支持的操作组合: {}；仅支持: {}".format(
+            " ".join(steps), _combos_text()), file=sys.stderr)
+        return 2
+
     try:
         sync = _sync(layout)
     except ConfigError as exc:
@@ -144,10 +192,7 @@ def main(argv=None):
         # exec_self 成功时不返回；失败（网络等）只已警告，继续执行本命令
 
     try:
-        if args.cmd == "push":
-            status, message = sync.push()
-        else:
-            status, message = sync.pull()
+        status, message = sync.run(list(steps))
     except BlockingIOError:
         print("另一实例正在运行（锁被占用）: {}".format(
             layout.lock_path), file=sys.stderr)

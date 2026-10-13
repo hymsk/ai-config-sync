@@ -115,5 +115,24 @@ class RepoConfigTest(unittest.TestCase):
         self.assertEqual(cfg.max_backups_per_file, 20)
 
 
+class StepCombinationTest(unittest.TestCase):
+    def test_only_six_operations_are_allowed(self):
+        from ai_config_sync import cli
+        allowed = {" ".join(c) for c in cli.ALLOWED}
+        self.assertEqual(allowed, {
+            "commit", "push", "sync", "pull",
+            "commit push", "push sync", "pull sync"})
+
+    def test_reversed_semantics_are_rejected_by_cli(self):
+        import contextlib
+        import io
+        from ai_config_sync import cli
+        # push commit / sync push 等异常语义直接拒绝（返回 2），不触碰安装目录
+        for bad in (["push", "commit"], ["sync", "push"],
+                    ["commit", "pull"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(bad), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

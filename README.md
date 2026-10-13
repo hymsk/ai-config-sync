@@ -2,15 +2,25 @@
 
 > Archive and restore configuration files on Linux hosts through a dedicated Git repository, one direction at a time.
 
-A rule-driven CLI with two explicit, manually triggered operations — no daemon, no automatic two-way convergence, **no merging of any kind**:
+A rule-driven CLI with four atomic operations and three fixed combinations — no daemon, no automatic two-way convergence, **no merging of any kind**. Each atomic step does exactly one thing:
 
-- `push` (host -> repo): make the repo's `source/` an exact mirror of this host's managed files, commit, and push.
-- `pull` (repo -> host): write the config repository's managed files back to this host, with a pre-write backup, format validation, and atomic replace.
+- `commit` (host files -> local config): mirror managed host files into the worktree and make a **local commit**. Offline.
+- `push` (local config -> remote): push the local commits to the remote. Does **not** recompute host files.
+- `sync` (local config -> host): write the managed files from local HEAD back to the host (pre-write backup, validation, atomic replace). Offline, and **never deletes host files**.
+- `pull` (remote -> local config): `fetch` and **fast-forward only** the local branch. Does **not** touch host files.
+
+Combinations, written in execution order (only these three; `push commit` and friends are rejected):
+
+| Combination | Data flow | Equivalent to |
+|---|---|---|
+| `commit push` | host files -> remote | archive & push (file truth) |
+| `push sync` | local config -> remote + host | local-git truth |
+| `pull sync` | remote -> host | fetch & write back (remote truth) |
 
 [中文](README.zh-cn.md) · [Specification](SPEC.md) · [Changelog](CHANGELOG.md)
 
 - Pure rule-driven: no LLM, no external Python dependencies (Python >= 3.9, ships a minimal TOML parser).
-- Never rebases, force-pushes, resets, cleans or merges: the local branch only ever fast-forwards (`--ff-only`) to the remote; a real divergence is reported for manual handling, with the scene preserved.
+- Never rebases, force-pushes, resets, cleans or merges: only `pull` ever fast-forwards (`--ff-only`) the local branch; `push` refuses when the remote is ahead or diverged; a real divergence is reported, with the scene preserved.
 - File-truth model: every change decision is an immediate "host file hash <-> Git blob hash" comparison; no per-file state files.
 
 ## Two repositories
@@ -60,58 +70,88 @@ ai-config-sync install attach <repo-url> [-b <branch>] [-p <path>]
 ## Usage
 
 ```bash
-ai-config-sync push   # host -> repo: archive managed files, commit, push
-ai-config-sync pull   # repo -> host: back up, then write managed files back
-ai-config-sync update # self-update: fast-forward the install repo to the latest vX.Y.Z tag
+ai-config-sync commit        # host files -> local config (mirror + local commit)
+ai-config-sync push          # local config -> remote (push local commits only)
+ai-config-sync sync          # local config -> host (write back, pre-write backup)
+ai-config-sync pull          # remote -> local config (fast-forward only)
+ai-config-sync commit push   # host files -> remote (archive & push)
+ai-config-sync push sync     # local config -> remote + host (local-git truth)
+ai-config-sync pull sync     # remote -> host (fetch & write back)
+ai-config-sync update        # self-update: fast-forward the install repo to the latest vX.Y.Z tag
 ```
 
-Both sync operations are one-shot and manually triggered. Each acquires an exclusive lock while running; a second instance fails immediately with exit code 3.
+Every operation is one-shot and manually triggered. A call acquires an exclusive lock for its whole run (including combinations); a second instance fails immediately with exit code 3.
 
-Before every `push`/`pull` the tool also runs a quick self-update check (5s timeout): it looks up the highest `vX.Y.Z` tag on the tool's own remote and, if newer than the running version, fast-forwards the install repository (`--ff-only`, no merge, no force) and re-executes the command so the new code takes effect immediately. A failed or unreachable check is only a warning — it never blocks the sync. `update` run manually does the same with a 60s timeout and reports the result; a non-git installation (e.g. a wheel) cannot self-update and says so explicitly.
+Before every sync operation the tool also runs a quick self-update check (5s timeout): it looks up the highest `vX.Y.Z` tag on the tool's own remote and, if newer than the running version, fast-forwards the install repository (`--ff-only`, no merge, no force) and re-executes the command so the new code takes effect immediately. A failed or unreachable check is only a warning — it never blocks the sync. `update` run manually does the same with a 60s timeout and reports the result; a non-git installation (e.g. a wheel) cannot self-update and says so explicitly.
 
-### push (host -> repo)
+### commit (host files -> local config)
 
 ```text
-1. acquire the lock
-2. fetch + fast-forward-only align with origin/<branch> (no merge of any kind;
-   a real divergence -> error-conflict, scene preserved for manual resolution)
-3. require a clean worktree (unknown changes -> error-dirty)
-4. read effective config and expand the include list (stable read: two hashes agree)
-5. prefix check: every include rule's literal prefix must exist on this host
+1. require the current branch to be the bootstrap branch
+2. require a clean worktree (unknown changes -> error-dirty)
+3. read effective config and expand the include list (stable read: two hashes agree)
+4. prefix check: every include rule's literal prefix must exist on this host
    (an explicitly listed file gone, or a whole dir like /etc/xxx/** missing
-    -> error-missing: fix sync.list or restore the path, then re-run;
-    a mere file deleted inside an existing dir is fine — mirror removal)
-6. write host changes into the worktree source/...
-7. mirror removal: managed paths that no longer exist on this host are
-   git-rm'ed from the repo (deletions propagate in the push direction)
-8. commit (explicit paths, offline), then push (a non-FF rejection — a push
-   race — reports an error telling you to re-run; no automatic retry)
-9. report archived/removed counts
+    -> error-missing; a mere file deleted inside an existing dir is fine)
+5. write host changes into the worktree source/...
+6. mirror removal: managed paths that no longer exist on this host are git-rm'ed
+7. git add/rm explicit paths + local commit (offline); no change -> no empty commit
+8. report archived/removed counts
 ```
 
-Mirror semantics: `push` is "the last pusher wins". A file another machine
-archived but this host lacks is **removed** from the repo; to keep it, `pull`
-first, then `push`. A file modified on both sides never conflicts — the local
-content simply overwrites the remote (local priority); to accept the remote
-version, `pull` first.
+`commit` is offline and never touches the remote; pushing is `push`'s job.
 
-### pull (repo -> host)
+### push (local config -> remote)
 
 ```text
-1. acquire the lock
-2. fetch + fast-forward-only align (same rules as push step 2)
-3. read effective config and expand the include list (including repo-side
-   paths missing on this host — that is what pull reconstructs)
-4. for each managed source/... file in HEAD:
+1. require the bootstrap branch; require a clean worktree
+2. fetch; compare local HEAD with origin/<branch>:
+   - identical -> nothing to do
+   - local behind (remote has commits we lack) -> error-conflict, NO fast-forward
+     (use pull / pull sync instead)
+   - diverged -> error-conflict, scene preserved
+   - local ahead -> continue
+3. push the local commits only (host files are not recomputed)
+4. a rejection (non-FF push race) -> error-conflict, no automatic retry
+5. report the number of commits pushed
+```
+
+`push` does not read the include list and never touches host files. Unlike the old
+combined model, a file changed on both sides is **no longer silently overwritten**:
+if the remote advanced while you were committing, `push` reports `error-conflict`
+(a divergence) instead. To let local content win, `pull` first, choose locally,
+then `commit push`; when local content is already a local commit, `push sync`
+suffices.
+
+### sync (local config -> host)
+
+```text
+1. read effective config and expand the include list (including repo-side paths
+   missing on this host — that is what sync reconstructs)
+2. for each managed source/... file in HEAD:
    - identical on host -> skip
    - .json/.toml failing validation -> skip (counted as skipped)
    - back up the host file to state/backups/<run_id>/<repo_path>, then prune
    - atomic replace (preserve mode/uid/gid; new files 0644)
-5. report written/skipped counts
+3. report written/skipped counts
 ```
 
-Deletions never cross `pull`: a path absent from the repo is never deleted
-from the host by `pull`.
+`sync` is offline and never deletes host files: a path absent from the repo is kept.
+
+### pull (remote -> local config)
+
+```text
+1. require the bootstrap branch; require a clean worktree
+2. fetch; compare local HEAD with origin/<branch>:
+   - identical -> nothing to do
+   - local ahead (unpushed commits) -> nothing to do
+   - local behind -> fast-forward only (--ff-only, no merge)
+   - diverged -> error-conflict, scene preserved
+3. report whether it fast-forwarded
+```
+
+`pull` never touches host files; landing the result is `sync`'s job, which is exactly
+what the `pull sync` combination does.
 
 ## sync.list syntax
 
@@ -137,12 +177,15 @@ email = "sync-bot@invalid"
 
 ## Conflict handling
 
-There is no merge engine: `push` and `pull` only ever fast-forward the local
-branch (`--ff-only`). Consequences:
+There is no merge engine: only `pull` ever fast-forwards the local branch
+(`--ff-only`), and `push` refuses whenever the remote is ahead or diverged.
+Consequences:
 
-- **Same file changed on both sides** — no conflict is possible during `push`:
-  the operation is a mirror, local content overwrites the remote (local
-  priority). To accept the remote version instead, run `pull` first.
+- **Same file changed on both sides** — after the split, `commit push` does
+  **not** silently overwrite the remote. If the remote advanced while you were
+  committing, `push` stops with `error-conflict` (a divergence). To let local
+  content win: `pull`, reconcile locally, then `commit push`; if local content is
+  already a local commit, just `push sync`.
 - **Diverged branch** (local and remote each hold commits the other lacks,
   usually from manual edits in the worktree) — `push`/`pull` stop with
   `error-conflict` and preserve the scene for a human:
@@ -151,12 +194,14 @@ branch (`--ff-only`). Consequences:
 cd /var/lib/ai-config-sync/repo
 git log --oneline --graph --all          # inspect the divergence
 # either push your local commits manually, or drop them deliberately,
-# then re-run ai-config-sync push / pull
+# then re-run ai-config-sync push / pull sync
 ```
 
 - **Push rejected (non-fast-forward)** — another machine pushed between your
-  fetch and your push. Re-run the command; it re-aligns and retries the
-  archive.
+  fetch and your push. Re-run the command; it re-aligns and retries the archive.
+- **Local behind on `push`** — the remote has commits you lack (e.g. you ran
+  `commit` but not `pull` first). `push` refuses with `error-conflict` and points
+  you at `pull` / `pull sync`. It never auto fast-forwards.
 
 ## Uninstallation
 
@@ -170,8 +215,9 @@ Data directories are preserved by default; note the working tree may contain unp
 
 ## Known limits
 
-- Deletions propagate in the push direction only (mirror removal); `pull` never deletes host files.
-- Multi-machine mirror semantics: the last pusher wins; pull before push if you want to keep another machine's archived files.
+- Deletions propagate in the `commit` direction only (mirror removal); `sync` never deletes host files.
+- `sync` does not see the remote and `pull` does not see host files: `pull sync` is the full "remote truth" write-back; `push` does not recompute host files and `sync` is offline: `push sync` is "local-git truth".
+- Multi-machine mirror semantics: `commit push` is the last pusher wins; `pull sync` first if you want to keep another machine's archived files.
 - Config files rewritten by their own application create archive feedback loops; do not include them.
 - All machines share one include list and one config; no per-machine variance.
 - Only regular files; symlinks are skipped with a warning.
@@ -185,7 +231,7 @@ python3 -m pip install -e .
 python3 -m unittest discover -s tests -t . -v
 ```
 
-Tests use a local bare repository as the remote and cover: include-list matching and hard exclusion, `push` archiving and pushing, mirror removal, missing-prefix errors, fast-forward alignment and divergence errors, `pull` write-back with backup, format-validation skips, symlink skipping, CRLF byte fidelity, installation branch rules (including `--force` orphan branches and attach default-branch resolution), auth-error boundaries, and backup pruning.
+Tests use a local bare repository as the remote and cover: include-list matching and hard exclusion, `commit` local archiving and mirror removal, `push` pushing and refusing a remote-ahead/diverged state, `sync` write-back with backup, `pull` fast-forward-only and divergence refusal, the `commit push` / `push sync` / `pull sync` combinations, rejection of abnormal combinations, missing-prefix errors, format-validation skips, symlink skipping, CRLF byte fidelity, installation branch rules (including `--force` orphan branches and attach default-branch resolution), auth-error boundaries, and backup pruning.
 
 ## License
 
