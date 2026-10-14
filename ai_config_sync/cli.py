@@ -11,13 +11,11 @@
 - clear：     丢弃本地仓库的全部未提交改动（显式破坏性命令，不参与组合）
 
 操作按执行顺序书写；只接受上述固定组合，拒绝 `push commit` 等异常语义。
-同步操作执行前自动做一次 update 检查（5s 超时，失败只警告不阻塞）；
-有更新则更新后重新执行命令（环境变量防循环）。无常驻进程。
+更新仅由手动 update 命令触发，不在其他命令前自动执行。无常驻进程。
 """
 
 import argparse
 import logging
-import os
 import re
 import sys
 import unicodedata
@@ -26,8 +24,6 @@ from logging.handlers import RotatingFileHandler
 from . import __version__, gitops, installer, updater
 from .config import ConfigError, Layout, load_bootstrap
 from .engine import Sync, SyncError
-
-NO_UPDATE_ENV = "AI_CONFIG_SYNC_NO_UPDATE"
 
 STEPS = ("commit", "push", "sync", "pull")
 
@@ -107,26 +103,6 @@ def _install_dir_or_empty(layout: Layout) -> str:
         return load_bootstrap(layout).install_dir
     except ConfigError:
         return ""
-
-
-def _auto_update(log):
-    """同步操作前的自动更新检查（5s 超时）；失败只警告不阻塞。
-
-    有更新则更新安装仓库并替换进程重跑命令（新代码立即生效）。
-    """
-    install_dir = _install_dir_or_empty(Layout())
-    if not install_dir:
-        return  # 未安装或非 git 检出，无从更新
-    try:
-        updated, tag = updater.check_and_update(
-            install_dir, log=log, timeout=5)
-    except updater.UpdateError as exc:
-        print("警告: {}".format(exc), file=sys.stderr)
-        return
-    if updated:
-        print("已更新到 {}，重新执行命令".format(tag))
-        cmd = [sys.executable, "-m", "ai_config_sync"] + sys.argv[1:]
-        updater.exec_self(cmd)
 
 
 def _add_operations(sub):
@@ -299,11 +275,6 @@ def main(argv=None):
     except ConfigError as exc:
         print("配置错误: {}".format(exc), file=sys.stderr)
         return 2
-
-    if os.environ.get(NO_UPDATE_ENV) != "1":
-        logger = _setup_log(layout)
-        _auto_update(logger.info)
-        # exec_self 成功时不返回；失败（网络等）只已警告，继续执行本命令
 
     try:
         status, message = sync.run(list(steps))

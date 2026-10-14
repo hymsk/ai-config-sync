@@ -21,8 +21,8 @@
 | `push sync` | 本地 config → 远端 + 本机 | 以本地 git 为准 |
 | `pull sync` | 远端 → 本机 | 拉取并写回（以远端为准） |
 
-- `update`：快进安装仓库到远端最高 `vX.Y.Z` tag；`commit`/`push`/`sync`/`pull`
-  执行前自动做同样的检查（5s 超时，失败只警告不阻塞；有更新则更新后重新执行命令）。
+- `update`：快进安装仓库到远端最高 `vX.Y.Z` tag（纯手动命令，
+  不在其他命令执行前自动检查）。
 - `clear`：丢弃本地 config 工作树的全部未提交改动（显式破坏性命令，
   不参与组合，见第 13 节）。
 
@@ -212,16 +212,14 @@
 
 ## 12. update（自更新）
 
+- 纯手动命令：不在 commit/push/sync/pull 等命令执行前自动做任何检查。
 - 版本只看 tag：`git ls-remote --tags`（`--refs`，仅 `vX.Y.Z` 格式）取最高版本，
   与本地 `__version__` 比较；不比较分支，发布以 tag 为准。
 - 更新 = 安装目录（`bootstrap.toml` 的 `install_dir`，须为 git 检出）执行
   `fetch --tags` + `merge --ff-only <tag>`；无三方合并、无 force、无 reset。
 - 本地无法快进（历史分叉/被改写）→ 报错保留现场交人工。
-- 非 git 检出安装（wheel 等）无法自更新：手动 `update` 明确报错，
-  自动检查静默跳过。
-- 超时：手动 `update` 60s；commit/push/sync/pull 前的自动检查 5s，失败只警告不阻塞。
-- 自动检查有更新时更新安装仓库后以替换进程重新执行命令
-  （环境变量 `AI_CONFIG_SYNC_NO_UPDATE=1` 防循环，re-exec 后跳过检查）。
+- 非 git 检出安装（wheel 等）无法自更新，明确报错。
+- 超时：60s。
 
 ## 13. clear（丢弃本地未提交改动）
 

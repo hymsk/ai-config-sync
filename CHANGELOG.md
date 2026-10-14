@@ -2,6 +2,12 @@
 
 Version history is kept newest first. The repository is a private baseline; no package has been published — releases are Git tags only.
 
+## 0.7.0
+
+### Changed
+
+- **Self-update is manual-only.** The automatic pre-run update check (a 5s tag lookup before every `commit`/`push`/`sync`/`pull`, followed by a fast-forward of the install repo and a process re-exec when a newer tag existed) has been removed, together with the `AI_CONFIG_SYNC_NO_UPDATE` escape hatch and `updater.exec_self`. `ai-config-sync update` keeps doing the exact same job when run manually (60s, `--ff-only`, no force, no reset); non-git installations still report explicitly.
+
 ## 0.6.0
 
 ### Added

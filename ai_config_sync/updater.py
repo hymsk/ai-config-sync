@@ -109,12 +109,5 @@ def check_and_update(install_dir, log=None, timeout=5):
         # HEAD 已在 tag 上但版本号更旧（忘改 __init__.py 之类），不重装
         return False, None
     except gitops.GitError as exc:
-        # 网络抖动等：静默放弃本轮自动更新，手动 update 时会再报
+        # 网络等失败：交由调用方（手动 update 命令）报告
         raise UpdateError("更新失败: {}".format(exc))
-
-
-def exec_self(args):
-    """以替换方式重新执行本命令（更新后让新代码生效）。"""
-    env = dict(os.environ)
-    env["AI_CONFIG_SYNC_NO_UPDATE"] = "1"
-    os.execvpe(args[0], args, env)

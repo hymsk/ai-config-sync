@@ -83,7 +83,7 @@ ai-config-sync clear         # discard ALL uncommitted changes in the local conf
 
 Every operation is one-shot and manually triggered. A call acquires an exclusive lock for its whole run (including combinations); a second instance fails immediately with exit code 3.
 
-Before every sync operation the tool also runs a quick self-update check (5s timeout): it looks up the highest `vX.Y.Z` tag on the tool's own remote and, if newer than the running version, fast-forwards the install repository (`--ff-only`, no merge, no force) and re-executes the command so the new code takes effect immediately. A failed or unreachable check is only a warning — it never blocks the sync. `update` run manually does the same with a 60s timeout and reports the result; a non-git installation (e.g. a wheel) cannot self-update and says so explicitly.
+Self-update is strictly manual: `ai-config-sync update` looks up the highest `vX.Y.Z` tag on the tool's own remote (60s timeout) and, if newer than the running version, fast-forwards the install repository (`--ff-only`, no merge, no force) and reports the result; a non-git installation (e.g. a wheel) cannot self-update and says so explicitly. No update check runs before any other command.
 
 ### commit (host files -> local config)
 
