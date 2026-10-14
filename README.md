@@ -20,7 +20,7 @@ Combinations, written in execution order (only these three; `push commit` and fr
 [中文](README.zh-cn.md) · [Specification](SPEC.md) · [Changelog](CHANGELOG.md)
 
 - Pure rule-driven: no LLM, no external Python dependencies (Python >= 3.9, ships a minimal TOML parser).
-- Never rebases, force-pushes, resets, cleans or merges: only `pull` ever fast-forwards (`--ff-only`) the local branch; `push` refuses when the remote is ahead or diverged; a real divergence is reported, with the scene preserved.
+- Never rebases, force-pushes, resets, cleans or merges (the standalone `clear` command is the single deliberate exception): only `pull` ever fast-forwards (`--ff-only`) the local branch; `push` refuses when the remote is ahead or diverged; a real divergence is reported, with the scene preserved.
 - File-truth model: every change decision is an immediate "host file hash <-> Git blob hash" comparison; no per-file state files.
 
 ## Two repositories
@@ -78,6 +78,7 @@ ai-config-sync commit push   # host files -> remote (archive & push)
 ai-config-sync push sync     # local config -> remote + host (local-git truth)
 ai-config-sync pull sync     # remote -> host (fetch & write back)
 ai-config-sync update        # self-update: fast-forward the install repo to the latest vX.Y.Z tag
+ai-config-sync clear         # discard ALL uncommitted changes in the local config worktree
 ```
 
 Every operation is one-shot and manually triggered. A call acquires an exclusive lock for its whole run (including combinations); a second instance fails immediately with exit code 3.
@@ -88,7 +89,8 @@ Before every sync operation the tool also runs a quick self-update check (5s tim
 
 ```text
 1. require the current branch to be the bootstrap branch
-2. require a clean worktree (unknown changes -> error-dirty)
+2. finalize pending source/ mirror changes from an interrupted commit as-is
+   (a new local commit); any other unknown change -> error-dirty
 3. read effective config and expand the include list (stable read: two hashes agree)
 4. prefix check: every include rule's literal prefix must exist on this host
    (an explicitly listed file gone, or a whole dir like /etc/xxx/** missing
@@ -104,19 +106,24 @@ Before every sync operation the tool also runs a quick self-update check (5s tim
 ### push (local config -> remote)
 
 ```text
-1. require the bootstrap branch; require a clean worktree
-2. fetch; compare local HEAD with origin/<branch>:
+1. require the bootstrap branch
+2. finalize pending source/ mirror changes from an interrupted commit as-is
+   (a new local commit; other unknown changes -> error-dirty)
+3. fetch; compare local HEAD with origin/<branch>:
    - identical -> nothing to do
    - local behind (remote has commits we lack) -> error-conflict, NO fast-forward
      (use pull / pull sync instead)
    - diverged -> error-conflict, scene preserved
    - local ahead -> continue
-3. push the local commits only (host files are not recomputed)
-4. a rejection (non-FF push race) -> error-conflict, no automatic retry
-5. report the number of commits pushed
+4. push the local commits (including the finalize commit; host files
+   are not recomputed)
+5. a rejection (non-FF push race) -> error-conflict, no automatic retry
+6. report the number of commits pushed
 ```
 
-`push` does not read the include list and never touches host files. Unlike the old
+`push` does not read the include list and never recomputes host files. Pending
+`source/` mirror edits left behind by an interrupted `commit` are committed
+as-is first and then pushed, so no manual git cleanup is ever needed. Unlike the old
 combined model, a file changed on both sides is **no longer silently overwritten**:
 if the remote advanced while you were committing, `push` reports `error-conflict`
 (a divergence) instead. To let local content win, `pull` first, choose locally,
@@ -141,7 +148,8 @@ suffices.
 ### pull (remote -> local config)
 
 ```text
-1. require the bootstrap branch; require a clean worktree
+1. require the bootstrap branch; require a clean worktree (pending mirror
+   leftovers from an interrupted commit must be finalized via push/commit first)
 2. fetch; compare local HEAD with origin/<branch>:
    - identical -> nothing to do
    - local ahead (unpushed commits) -> nothing to do
@@ -152,6 +160,22 @@ suffices.
 
 `pull` never touches host files; landing the result is `sync`'s job, which is exactly
 what the `pull sync` combination does.
+
+### clear (discard uncommitted changes)
+
+```text
+1. require the bootstrap branch and an existing HEAD; hold the exclusive lock
+2. discard everything uncommitted in the worktree:
+   git reset --hard HEAD (tracked files, staged included)
+   + git clean -fd (untracked files/dirs; ignored files and nested git
+   repositories stay)
+3. a clean worktree -> no-op; anything that cannot be discarded -> error-dirty
+```
+
+`clear` is offline and never touches host files. It is the one-shot replacement
+for manually resolving an error-dirty scene: for `source/` mirror leftovers from
+an interrupted commit, push/commit finalize them into a commit, while `clear`
+deliberately drops them, restoring HEAD as the truth.
 
 ## sync.list syntax
 

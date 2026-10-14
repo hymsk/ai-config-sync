@@ -2,15 +2,19 @@
 
 原子步骤（每个只做一件事，边界明确）：
 - commit：本机受管文件 → 本地 config（镜像写入工作树 + 本地提交；不联网）
-- push：  本地 config → 远端（只推送本地提交；不重算主机文件）
+- push：  本地 config → 远端（先把 source/ 残留镜像改动按当前内容补提交，
+  再只推送本地提交；不读清单、不重算主机文件）
 - sync：  本地 config → 本机（写回受管文件；不联网、永不删除主机文件）
 - pull：  远端 → 本地 config（fetch + 仅 --ff-only 对齐；不碰主机文件）
 
 CLI 只接受按执行顺序书写的固定组合：commit push / push sync / pull sync。
 
-共用不变量：不 rebase、不 force push、不 reset、不 clean；不做三方合并；
+共用不变量：不 rebase、不 force push、不 reset、不 clean（clear 命令是
+显式例外）；不做三方合并；
 远端存在本地没有的提交一律报错保留现场交人工；每条 git 命令强制
 core.autocrlf=false；commit/sync 的提交与写回只含显式路径。
+commit/push 开始时把上次 commit 中断残留在 source/ 的镜像改动按工作树
+当前内容补提交（中断自恢复，无需人工善后）；其余未知改动 error-dirty 交人工。
 """
 
 import fcntl
@@ -86,13 +90,66 @@ class Sync:
                 "当前分支不是 {}（detached 或位于其他分支），已保留现场；"
                 "请在 {} 中手动处理".format(self.branch, self.wt))
 
-    def _require_clean(self, action):
-        dirty = gitops.status_porcelain(self.wt)
-        if dirty:
+    def _split_dirty(self):
+        """把工作树脏条目分为（source/ 镜像路径, 未知改动条目）。
+
+        镜像残留 = 上次 commit 中断在 source/ 下留下的改动
+        （含已修改/已暂存/已删除/未跟踪的新镜像）；
+        .sync-config、source/ 之外的改动、重命名条目属未知改动，交人工。
+        """
+        mirror, unknown = [], []
+        for entry in gitops.status_porcelain(self.wt):
+            path = entry[3:]
+            if " -> " in path or not path.startswith("source/"):
+                unknown.append(entry)
+            else:
+                mirror.append(path)
+        return mirror, unknown
+
+    def _finalize_pending(self, step):
+        """了结上次 commit 中断残留的镜像改动（commit/push 共用）。
+
+        以工作树当前内容为准补一个本地提交，不重读主机文件：
+        文件存在 → git add；已删除 → git rm；有暂存内容则提交。
+        未知改动 → error-dirty 人工处理。
+        返回给用户看的了结摘要（无残留时为 None）。
+        """
+        mirror, unknown = self._split_dirty()
+        if unknown:
             raise SyncError(
                 "error-dirty",
-                "工作树存在未提交改动，无法{}，请先手动处理: {}".format(
-                    action, "; ".join(dirty[:5])))
+                "工作树存在未知改动（source/ 之外或 .sync-config），无法{}，"
+                "请先手动处理: {}".format(step, "; ".join(unknown[:5])))
+        if not mirror:
+            return None
+        self._refresh_identity()
+        add_paths, rm_paths = [], []
+        for path in mirror:
+            target = add_paths if (self.wt / path).exists() else rm_paths
+            target.append(path)
+        gitops.add(self.wt, add_paths)
+        gitops.rm(self.wt, rm_paths)
+        if gitops.staged_exists(self.wt):
+            gitops.commit(
+                self.wt,
+                "sync: finalize {} pending mirror changes (host: {})".format(
+                    len(mirror), socket.gethostname().split(".")[0]),
+                self.identity)
+        return "已按当前内容补提交残留镜像改动 {} 个".format(len(mirror))
+
+    def _refresh_identity(self):
+        """尽力读取配置中的提交身份；失败保持默认（主流程 _load 会严格报错）。"""
+        try:
+            cfg = parse_repo_config(
+                (self.wt / ".sync-config" / "config.toml").read_text(
+                    encoding="utf-8"))
+            self.identity = (cfg.git_name, cfg.git_email)
+        except (OSError, ConfigError):
+            pass
+
+    @staticmethod
+    def _join(prefix, msg):
+        return "{}；{}".format(prefix, msg) if prefix else msg
 
     def _load(self, include_repo_only=True):
         """读取生效配置与受管清单，返回 (cfg, rules, managed)。
@@ -166,7 +223,7 @@ class Sync:
 
     def _step_commit(self):
         self._check_branch()
-        self._require_clean("commit（归档前工作树须干净）")
+        finalize_msg = self._finalize_pending("commit")
         cfg, rules, managed = self._load(include_repo_only=True)
         self._check_prefixes(rules)
         if gitops.head(self.wt) is None:
@@ -192,6 +249,8 @@ class Sync:
         removed = [rp for hp, rp in managed.files.items()
                    if not Path(hp).is_file()]
         if not changed and not removed:
+            if finalize_msg:
+                return ("ok", finalize_msg)
             msg = "无变动可提交"
             if unstable:
                 msg += "，跳过 {} 个未稳定文件".format(len(unstable))
@@ -208,8 +267,10 @@ class Sync:
                 len(changed), len(removed),
                 socket.gethostname().split(".")[0])
             gitops.commit(self.wt, message, self.identity)
-        msg = "归档 {} 个文件，移除 {} 个（已本地提交）".format(
-            len(changed), len(removed))
+        msg = self._join(
+            finalize_msg,
+            "归档 {} 个文件，移除 {} 个（已本地提交）".format(
+                len(changed), len(removed)))
         if unstable:
             msg += "，跳过 {} 个未稳定文件".format(len(unstable))
         return ("ok", msg)
@@ -218,7 +279,9 @@ class Sync:
 
     def _step_push(self):
         self._check_branch()
-        self._require_clean("push（推送前工作树须干净）")
+        # 先了结上次 commit 中断残留的镜像改动（按工作树当前内容补提交），
+        # 再只推送本地提交；不读清单、不重算主机文件。
+        finalize_msg = self._finalize_pending("push")
         self._fetch()
         origin = gitops.ref_sha(self.wt, self._remote_ref())
         if origin is None:
@@ -229,7 +292,7 @@ class Sync:
         if local is None:
             raise SyncError("error-state", "工作树无提交")
         if local == origin:
-            return ("ok", "无本地提交可推送")
+            return ("ok", self._join(finalize_msg, "无本地提交可推送"))
         if gitops.is_ancestor(self.wt, local, origin):
             raise SyncError(
                 "error-conflict",
@@ -252,7 +315,8 @@ class Sync:
                     "若持续失败请在 {} 手动检查".format(self.wt))
             raise SyncError("error-transient", "推送失败: {}".format(exc))
         count = gitops.count_commits(self.wt, "{}..{}".format(origin, local))
-        return ("ok", "已推送 {} 个提交".format(count))
+        return ("ok", self._join(
+            finalize_msg, "已推送 {} 个提交".format(count)))
 
     # ---------- sync：本地 config → 本机 ----------
 
@@ -299,7 +363,18 @@ class Sync:
 
     def _step_pull(self):
         self._check_branch()
-        self._require_clean("pull（拉取前工作树须干净）")
+        mirror, unknown = self._split_dirty()
+        if unknown:
+            raise SyncError(
+                "error-dirty",
+                "工作树存在未知改动，无法pull（拉取前工作树须干净），"
+                "请先手动处理: {}".format("; ".join(unknown[:5])))
+        if mirror:
+            raise SyncError(
+                "error-dirty",
+                "工作树存在上次中断残留的镜像改动，无法pull（快进前须先了结）；"
+                "请先执行 push（或 commit）自动补提交: {}".format(
+                    "; ".join(mirror[:5])))
         self._fetch()
         origin = gitops.ref_sha(self.wt, self._remote_ref())
         if origin is None:
@@ -345,3 +420,27 @@ class Sync:
 
     def pull(self):
         return self.run(["pull"])
+
+    # ---------- clear：丢弃本地仓库未提交改动 ----------
+
+    def clear(self):
+        """丢弃工作树全部未提交改动（reset --hard + clean -fd，显式例外）。"""
+        with self._lock():
+            return self._step_clear()
+
+    def _step_clear(self):
+        self._check_branch()
+        if gitops.head(self.wt) is None:
+            raise SyncError("error-state", "工作树无提交")
+        dirty = gitops.status_porcelain(self.wt)
+        if not dirty:
+            return ("ok", "工作树已干净，无改动可丢弃")
+        gitops.discard_all(self.wt)
+        left = gitops.status_porcelain(self.wt)
+        if left:
+            raise SyncError(
+                "error-dirty",
+                "部分改动无法丢弃（如嵌套 git 仓库），请手动处理: {}".format(
+                    "; ".join(left[:5])))
+        return ("ok", "已丢弃 {} 处未提交改动，工作树已与 HEAD 一致".format(
+            len(dirty)))

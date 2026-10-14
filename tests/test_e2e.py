@@ -107,6 +107,23 @@ class E2E(unittest.TestCase):
             self.s1.run(["commit"])
         self.assertEqual(cm.exception.status, "error-dirty")
 
+    def test_commit_finalizes_dirty_mirror_as_is(self):
+        # commit 开始时先把中断残留按当前内容补提交，再走正常归档
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        f.write_text("v1\n", encoding="utf-8")
+        mirror = self.layout1.default_worktree / ("source" + str(f))
+        mirror.write_text("v1\n", encoding="utf-8")  # 模拟中断残留（与主机一致）
+        status, msg = self.s1.run(["commit"])
+        self.assertEqual(status, "ok")
+        blob = gitops.blob_at(self.layout1.default_worktree, "HEAD",
+                              "source" + str(f))
+        self.assertEqual(blob.decode(), "v1\n")
+        # commit 不推送：远端仍是旧版本
+        self.assertEqual(self._repo_blob("source" + str(f)), "v0\n")
+        self.assertEqual(
+            gitops.status_porcelain(self.layout1.default_worktree), [])
+
     def test_commit_mirror_removes_deleted_host_files(self):
         f = host_file(self.host, "conf/a.txt", "v0\n")
         self.assertEqual(self.s1.run(["commit"])[0], "ok")
@@ -206,7 +223,46 @@ class E2E(unittest.TestCase):
             self.s1.run(["push"])
         self.assertEqual(cm.exception.status, "error-conflict")
 
-    def test_push_rejects_dirty_worktree(self):
+    def test_push_finalizes_dirty_mirror_as_is(self):
+        # push 把上次 commit 中断残留的镜像改动按工作树当前内容补提交并推送，
+        # 不重读主机文件（以仓库内容为准，主机此后怎么变都不影响）
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        mirror = self.layout1.default_worktree / ("source" + str(f))
+        mirror.write_text("v1\n", encoding="utf-8")  # 模拟中断残留
+        f.write_text("v2-host\n", encoding="utf-8")
+        status, msg = self.s1.run(["push"])
+        self.assertEqual(status, "ok")
+        self.assertEqual(self._repo_blob("source" + str(f)), "v1\n")
+        # push 不碰主机文件
+        self.assertEqual(f.read_text(), "v2-host\n")
+        # 补提交后工作树干净
+        self.assertEqual(
+            gitops.status_porcelain(self.layout1.default_worktree), [])
+
+    def test_push_finalizes_untracked_new_mirror(self):
+        # 新受管文件的镜像已写入但未 add：push 同样补提交并推送
+        f = host_file(self.host, "conf/new.txt", "n0\n")
+        mirror = self.layout1.default_worktree / ("source" + str(f))
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        mirror.write_text("n0\n", encoding="utf-8")
+        status, msg = self.s1.run(["push"])
+        self.assertEqual(status, "ok")
+        self.assertTrue(self._remote_has("source" + str(f)))
+        self.assertEqual(self._repo_blob("source" + str(f)), "n0\n")
+
+    def test_push_finalizes_mirror_deletion(self):
+        # 残留为镜像删除：push 补提交删除并推送（真镜像语义）
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        mirror = self.layout1.default_worktree / ("source" + str(f))
+        mirror.unlink()
+        status, msg = self.s1.run(["push"])
+        self.assertEqual(status, "ok")
+        self.assertFalse(self._remote_has("source" + str(f)))
+
+    def test_push_rejects_unknown_dirty(self):
+        # source/ 之外的未知改动不属于中断残留：仍拒绝，交人工
         wt = self.layout1.default_worktree
         (wt / "leftover.txt").write_text("x\n", encoding="utf-8")
         with self.assertRaises(SyncError) as cm:
@@ -297,6 +353,60 @@ class E2E(unittest.TestCase):
         with self.assertRaises(SyncError) as cm:
             self.s1.run(["pull"])
         self.assertEqual(cm.exception.status, "error-dirty")
+
+    def test_pull_rejects_pending_mirror_with_hint(self):
+        # 镜像残留可自动了结：pull 拒绝并提示先 push/commit
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        mirror = self.layout1.default_worktree / ("source" + str(f))
+        mirror.write_text("dirty\n", encoding="utf-8")
+        with self.assertRaises(SyncError) as cm:
+            self.s1.run(["pull"])
+        self.assertEqual(cm.exception.status, "error-dirty")
+        self.assertIn("push", cm.exception.message)
+
+    # ---------- clear：丢弃本地仓库未提交改动 ----------
+
+    def test_clear_discards_all_uncommitted(self):
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        wt = self.layout1.default_worktree
+        mirror = wt / ("source" + str(f))
+        mirror.write_text("dirty\n", encoding="utf-8")  # 已跟踪修改
+        (wt / "leftover.txt").write_text("x\n", encoding="utf-8")  # 未跟踪
+        status, msg = self.s1.clear()
+        self.assertEqual(status, "ok")
+        self.assertEqual(mirror.read_text(), "v0\n")
+        self.assertFalse((wt / "leftover.txt").exists())
+        self.assertEqual(gitops.status_porcelain(wt), [])
+
+    def test_clear_discards_staged_and_untracked_dir(self):
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit"])[0], "ok")
+        wt = self.layout1.default_worktree
+        mirror = wt / ("source" + str(f))
+        mirror.write_text("staged\n", encoding="utf-8")
+        gitops.add(wt, ["source" + str(f)])  # 已暂存
+        newdir = wt / "source" / "conf2"
+        newdir.mkdir(parents=True)
+        (newdir / "b.txt").write_text("n\n", encoding="utf-8")
+        status, msg = self.s1.clear()
+        self.assertEqual(status, "ok")
+        self.assertEqual(mirror.read_text(), "v0\n")
+        self.assertFalse(newdir.exists())
+        self.assertEqual(gitops.status_porcelain(wt), [])
+
+    def test_clear_clean_worktree_is_noop(self):
+        status, msg = self.s1.clear()
+        self.assertEqual(status, "ok")
+        self.assertIn("已干净", msg)
+
+    def test_clear_does_not_touch_host_files(self):
+        f = host_file(self.host, "conf/a.txt", "v0\n")
+        self.assertEqual(self.s1.run(["commit"])[0], "ok")
+        f.write_text("host-dirty\n", encoding="utf-8")
+        self.assertEqual(self.s1.clear()[0], "ok")
+        self.assertEqual(f.read_text(), "host-dirty\n")
 
     # ---------- 组合 ----------
 

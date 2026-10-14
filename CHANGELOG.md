@@ -2,6 +2,18 @@
 
 Version history is kept newest first. The repository is a private baseline; no package has been published — releases are Git tags only.
 
+## 0.6.0
+
+### Added
+
+- **Interrupted-commit recovery in `commit`/`push`.** Both steps now begin by committing any pending `source/` mirror changes left behind by an interrupted `commit` — modified, staged, deleted or untracked-new mirrors — **as-is, using the current worktree content**: `git add` for existing paths, `git rm` for deleted ones, then a single `sync: finalize N pending mirror changes (host: …)` commit. Pending local changes are thus committed and pushed with no manual git work. Host files are never re-read for this, and `push` still never reads the include list nor recomputes archives.
+- **`clear` command.** `ai-config-sync clear` discards ALL uncommitted changes in the local config worktree: `git reset --hard HEAD` (tracked files, staged included) + `git clean -fd` (untracked files/dirs; ignored files and nested git repositories stay). Offline, never touches host files, holds the exclusive lock, is a no-op on a clean worktree, and reports `error-dirty` if anything cannot be discarded. It is the single deliberate exception to the "never reset / never clean" invariant. For `source/` mirror leftovers it offers the opposite exit of the finalize path: `push`/`commit` commit them (worktree wins), `clear` drops them (HEAD wins).
+
+### Changed
+
+- **`commit`/`push` no longer abort with `error-dirty` on pending `source/` mirror changes** — they finalize them first (see above). Unknown changes — anything in `.sync-config`, outside `source/`, or rename entries — still fail with `error-dirty` for manual handling.
+- **`pull` still requires a clean worktree but explains it**: pending mirror leftovers are rejected with a hint to run `push` (or `commit`) first, which finalizes them automatically; other unknown changes keep the plain manual-handling message.
+
 ## 0.5.0
 
 ### Added

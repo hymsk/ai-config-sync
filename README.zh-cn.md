@@ -22,7 +22,8 @@
 [English](README.md) · [规范](SPEC.md) · [版本记录](CHANGELOG.md)
 
 - 纯规则驱动，无 LLM、无外部 Python 依赖（Python >= 3.9，自带极简 TOML 解析）。
-- 全程不 rebase、不 force push、不 reset、不 clean、**不做三方合并**：
+- 全程不 rebase、不 force push、不 reset、不 clean（独立命令 `clear` 是
+  唯一显式例外）、**不做三方合并**：
   只有 `pull` 会 `--ff-only` 快进本地分支；`push` 遇远端领先/分叉一律报错；
   真分叉一律报错保留现场交人工。
 - 以文件为准：所有变更判定都是"主机文件 Hash <-> Git blob Hash"即时对比，
@@ -84,6 +85,7 @@ ai-config-sync commit push  # 本机文件 → 远端（归档并推送）
 ai-config-sync push sync    # 本地 config → 远端 + 本机（以本地 git 为准）
 ai-config-sync pull sync    # 远端 → 本机（拉取并写回）
 ai-config-sync update       # 自更新：快进安装仓库到远端最新 vX.Y.Z tag
+ai-config-sync clear        # 丢弃本地 config 工作树的全部未提交改动
 ```
 
 每个操作都是一次性、手动触发。一次调用（含组合）全程持有独占锁；
@@ -99,7 +101,8 @@ ai-config-sync update       # 自更新：快进安装仓库到远端最新 vX.Y
 
 ```text
 1. 确认当前分支即 bootstrap 分支
-2. 要求工作树干净（有未知改动 → error-dirty）
+2. 了结上次 commit 中断残留的 source/ 镜像改动（按工作树当前内容
+   补一个本地提交）；其余未知改动 → error-dirty
 3. 读取生效配置与清单展开（稳定读：两次 Hash 一致）
 4. 前缀检查：每条纳入规则的字面前缀必须存在于本机
    （显式列出的文件没了，或 /etc/xxx/** 的 /etc/xxx 整个不存在
@@ -117,19 +120,23 @@ ai-config-sync update       # 自更新：快进安装仓库到远端最新 vX.Y
 ### push（本地 config → 远端）
 
 ```text
-1. 要求 bootstrap 分支；要求工作树干净
-2. fetch；比较本地 HEAD 与 origin/<branch>：
+1. 要求 bootstrap 分支
+2. 了结上次 commit 中断残留的 source/ 镜像改动（按当前内容补提交；
+   其余未知改动 → error-dirty）
+3. fetch；比较本地 HEAD 与 origin/<branch>：
    - 一致 → 无操作
    - 本地落后（远端有本地没有的提交）→ error-conflict，不自动快进
      （提示改用 pull / pull sync）
    - 真分叉 → error-conflict，保留现场交人工
    - 本地领先 → 继续
-3. 只推送本地已有提交（不重算主机文件）
-4. 被拒（non-FF 推送竞态）→ error-conflict，不自动重试
-5. 报告推送提交数
+4. 推送本地提交（含了结产生的提交；不重算主机文件）
+5. 被拒（non-FF 推送竞态）→ error-conflict，不自动重试
+6. 报告推送提交数
 ```
 
-`push` 不读清单、不碰主机文件。与旧模型不同，拆分后"同文件双侧修改"
+`push` 不读清单、不重算主机文件：上次 commit 中断残留的 source/ 镜像改动
+会先按工作树当前内容补提交并随之推送，全程无需人工进工作树善后。
+与旧模型不同，拆分后"同文件双侧修改"
 **不再被本地覆盖**：若远端在你 commit 期间前进，push 会以 `error-conflict`
 （分叉）拒绝而非覆盖。想让本机内容胜出，先 `pull`，本地取舍后再 `commit push`；
 本机内容已是本地提交时，直接 `push sync` 即可。
@@ -152,7 +159,8 @@ ai-config-sync update       # 自更新：快进安装仓库到远端最新 vX.Y
 ### pull（远端 → 本地 config）
 
 ```text
-1. 要求 bootstrap 分支；要求工作树干净
+1. 要求 bootstrap 分支；要求工作树干净（中断残留的镜像改动
+   可先经 push/commit 自动了结）
 2. fetch；比较本地 HEAD 与 origin/<branch>：
    - 一致 → 无操作
    - 本地领先（有未推送提交）→ 无操作
@@ -162,6 +170,19 @@ ai-config-sync update       # 自更新：快进安装仓库到远端最新 vX.Y
 ```
 
 `pull` 不碰主机文件；落地由 `sync` 负责，正是组合 `pull sync` 所做的事。
+
+### clear（丢弃本地未提交改动）
+
+```text
+1. 要求 bootstrap 分支且 HEAD 存在；全程持有独占锁
+2. 丢弃工作树全部未提交改动：git reset --hard HEAD（已跟踪文件，含暂存区）
+   + git clean -fd（未跟踪文件与目录；忽略文件与嵌套 git 仓库不动）
+3. 工作树已干净 → 无操作；无法丢弃的残留 → error-dirty
+```
+
+`clear` 不联网、不碰主机文件，是一键替代"error-dirty 手动处理"的入口：
+对中断残留的 `source/` 镜像改动，push/commit 选择补提交了结（以工作树
+当前内容为准），clear 选择直接丢弃（以 HEAD 为准）。
 
 ## sync.list 语法
 

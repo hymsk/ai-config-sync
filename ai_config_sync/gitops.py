@@ -1,6 +1,7 @@
 """全部 Git 操作的唯一封装。
 
-不变量：不 rebase、不 force push、不 reset、不 clean；不做三方合并，
+不变量：不 rebase、不 force push、不 reset、不 clean（clear 命令是显式
+例外：reset --hard + clean -fd 丢弃全部未提交改动）；不做三方合并，
 本地分支只允许 --ff-only 快进对齐远端；冲突保留现场；
 每条命令强制 core.autocrlf=false，保证字节级保真（哈希对比前提）。
 """
@@ -158,6 +159,16 @@ def rm(wt, paths):
         return
     run_git(["rm", "-q", "--ignore-unmatch", "--"] +
             [str(p) for p in paths], cwd=wt)
+
+
+def discard_all(wt):
+    """丢弃工作树全部未提交改动：clear 命令的显式例外（破坏性、显式触发）。
+
+    reset --hard 把已跟踪文件（含暂存区）恢复到 HEAD；clean -fd 移除未跟踪
+    文件与目录；.gitignore 忽略的文件与嵌套 git 仓库不动。
+    """
+    run_git(["reset", "--hard", "HEAD"], cwd=wt)
+    run_git(["clean", "-fd"], cwd=wt)
 
 
 def push(wt, branch, set_upstream=False):

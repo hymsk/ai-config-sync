@@ -2,12 +2,13 @@
 
 四个原子操作（各只做一件事）与三个固定组合：
 - commit：本机配置 → 本地仓库（归档 + 本地提交；不联网）
-- push：  本地仓库 → 远端仓库（只推送本地提交）
+- push：  本地仓库 → 远端仓库（先补提交中断残留的镜像改动，再推送本地提交）
 - sync：  本地仓库 → 本机配置（写回；不联网、永不删本机文件）
 - pull：  远端仓库 → 本地仓库（fetch + 仅快进；不碰本机文件）
 - commit push：本机配置 → 远端仓库（= 归档并推送）
 - push sync：  本地仓库 → 远端仓库 + 本机配置（以本地 git 为准）
 - pull sync：  远端仓库 → 本机配置（= 拉取并写回）
+- clear：     丢弃本地仓库的全部未提交改动（显式破坏性命令，不参与组合）
 
 操作按执行顺序书写；只接受上述固定组合，拒绝 `push commit` 等异常语义。
 同步操作执行前自动做一次 update 检查（5s 超时，失败只警告不阻塞）；
@@ -56,6 +57,7 @@ ACTION_DESC = (
 COMMAND_DESC = (
     ("install", "安装并绑定配置仓库"),
     ("update", "更新工具"),
+    ("clear", "丢弃本地仓库的未提交改动"),
 )
 
 # 单步操作的 (描述, 流向)，由 ACTION_DESC 派生。
@@ -211,6 +213,10 @@ def main(argv=None):
 
     _add_operations(sub)
     sub.add_parser("update", help="更新工具", description="更新工具")
+    sub.add_parser(
+        "clear", help="丢弃本地仓库的未提交改动",
+        description="丢弃工作树全部未提交改动（已跟踪文件恢复到 HEAD，"
+                    "未跟踪文件移除；不联网、不碰主机文件）")
 
     args = parser.parse_args(argv)
     layout = Layout()
@@ -262,6 +268,24 @@ def main(argv=None):
             print("ok 已更新到 {}（当前会话请重开或重新执行命令）".format(tag))
         else:
             print("ok 已是最新（v{}）".format(__version__))
+        return 0
+
+    if args.cmd == "clear":
+        try:
+            sync = _sync(layout)
+        except ConfigError as exc:
+            print("配置错误: {}".format(exc), file=sys.stderr)
+            return 2
+        try:
+            status, message = sync.clear()
+        except BlockingIOError:
+            print("另一实例正在运行（锁被占用）: {}".format(
+                layout.lock_path), file=sys.stderr)
+            return 3
+        except SyncError as exc:
+            print("{} {}".format(exc.status, exc.message), file=sys.stderr)
+            return exc.exit_code
+        print("{} {}".format(status, message))
         return 0
 
     steps = (args.cmd,) + tuple(args.rest)
