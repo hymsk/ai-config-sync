@@ -240,10 +240,9 @@ def main(argv=None):
         except updater.UpdateError as exc:
             print("更新失败: {}".format(exc), file=sys.stderr)
             return 1
-        if updated:
-            print("ok 已更新到 {}（当前会话请重开或重新执行命令）".format(tag))
-        else:
+        if not updated:
             print("ok 已是最新（v{}）".format(__version__))
+        # 已更新：过程已由日志逐行输出（发现新版本…/已更新到…），不再重复
         return 0
 
     if args.cmd == "clear":

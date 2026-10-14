@@ -98,7 +98,7 @@ Self-update is strictly manual: `ai-config-sync update` looks up the highest `vX
 5. write host changes into the worktree source/...
 6. mirror removal: managed paths that no longer exist on this host are git-rm'ed
 7. git add/rm explicit paths + local commit (offline); no change -> no empty commit
-8. report archived/removed counts
+8. report archived/removed counts (paths listed one per line)
 ```
 
 `commit` is offline and never touches the remote; pushing is `push`'s job.
@@ -118,7 +118,7 @@ Self-update is strictly manual: `ai-config-sync update` looks up the highest `vX
 4. push the local commits (including the finalize commit; host files
    are not recomputed)
 5. a rejection (non-FF push race) -> error-conflict, no automatic retry
-6. report the number of commits pushed
+6. report the number of commits pushed (each listed as "sha subject")
 ```
 
 `push` does not read the include list and never recomputes host files. Pending
@@ -140,7 +140,7 @@ suffices.
    - .json/.toml failing validation -> skip (counted as skipped)
    - back up the host file to state/backups/<run_id>/<repo_path>, then prune
    - atomic replace (preserve mode/uid/gid; new files 0644)
-3. report written/skipped counts
+3. report written/skipped counts (paths and skip reasons listed one per line)
 ```
 
 `sync` is offline and never deletes host files: a path absent from the repo is kept.
@@ -155,7 +155,7 @@ suffices.
    - local ahead (unpushed commits) -> nothing to do
    - local behind -> fast-forward only (--ff-only, no merge)
    - diverged -> error-conflict, scene preserved
-3. report whether it fast-forwarded
+3. report whether it fast-forwarded (fast-forwarded commits listed)
 ```
 
 `pull` never touches host files; landing the result is `sync`'s job, which is exactly

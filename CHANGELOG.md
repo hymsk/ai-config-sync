@@ -2,6 +2,16 @@
 
 Version history is kept newest first. The repository is a private baseline; no package has been published — releases are Git tags only.
 
+## 0.8.0
+
+### Added
+
+- **File- and commit-level output details.** Success messages now carry a git-log-like listing: `commit` lists archived (+) and removed (-) host paths, the interrupted-mirror finalize lists its paths, `sync` lists written files and per-file skip reasons, `pull`/`push` list the fast-forwarded/pushed commits (short sha + subject), and `clear` lists the discarded entries. Listings are indented one per line and truncated after 30 entries; combination steps are joined with newlines instead of "；".
+
+### Fixed
+
+- **`update` no longer prints a duplicate final line.** Update progress already streams through the log ("发现新版本 …，开始更新" / "已更新到 …"); the redundant trailing "ok 已更新到 …（当前会话请重开或重新执行命令）" is gone — the hint was obsolete anyway once update became manual-only.
+
 ## 0.7.0
 
 ### Changed

@@ -133,6 +133,12 @@ def count_commits(wt, rev_range):
     return int(out.decode().strip() or "0")
 
 
+def log_oneline(wt, rev_range):
+    """一行一条的提交清单（短 sha + 标题），供快进/推送明细输出。"""
+    _, out, _ = run_git(["log", "--oneline", rev_range], cwd=wt)
+    return [l for l in out.decode("utf-8", "replace").splitlines() if l.strip()]
+
+
 def commit(wt, message, identity):
     run_git(["commit", "-m", message], cwd=wt, identity=identity)
 

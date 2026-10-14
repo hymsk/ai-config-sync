@@ -86,8 +86,10 @@ class E2E(unittest.TestCase):
 
     def test_commit_archives_locally_without_push(self):
         f = host_file(self.host, "conf/app.json", '{"a": 1}\n')
-        status, _ = self.s1.run(["commit"])
+        status, msg = self.s1.run(["commit"])
         self.assertEqual(status, "ok")
+        # 明细列出归档文件路径
+        self.assertIn(str(f), msg)
         # 本地 HEAD 已是归档内容
         blob = gitops.blob_at(self.layout1.default_worktree, "HEAD",
                               "source" + str(f))
@@ -190,6 +192,8 @@ class E2E(unittest.TestCase):
         status, msg = self.s1.run(["push"])
         self.assertEqual(status, "ok")
         self.assertEqual(self._repo_blob("source" + str(f)), "v0\n")
+        # 明细列出推送的提交
+        self.assertIn("sync: archive", msg)
 
     def test_push_does_not_touch_host_files(self):
         f = host_file(self.host, "conf/a.txt", "v0\n")
@@ -275,10 +279,11 @@ class E2E(unittest.TestCase):
         f = host_file(self.host, "conf/a.txt", "v0\n")
         self.assertEqual(self.s1.run(["commit"])[0], "ok")
         f.unlink()
-        status, _ = self.s1.run(["sync"])
+        status, msg = self.s1.run(["sync"])
         self.assertEqual(status, "ok")
         self.assertEqual(f.read_text(), "v0\n")
-
+        # 明细列出写回的文件路径
+        self.assertIn(str(f), msg)
     def test_sync_recreates_missing_file(self):
         f = host_file(self.host, "conf/a.txt", "v0\n")
         self.assertEqual(self.s1.run(["commit"])[0], "ok")
@@ -319,6 +324,8 @@ class E2E(unittest.TestCase):
         status, msg = self.s1.run(["pull"])
         self.assertEqual(status, "ok")
         self.assertIn("快进", msg)
+        # 明细列出快进过来的提交
+        self.assertIn("remote edit", msg)
         # 本地 config 已更新，但主机文件未动
         blob = gitops.blob_at(self.layout1.default_worktree, "HEAD",
                               "source" + str(f))
@@ -376,6 +383,8 @@ class E2E(unittest.TestCase):
         (wt / "leftover.txt").write_text("x\n", encoding="utf-8")  # 未跟踪
         status, msg = self.s1.clear()
         self.assertEqual(status, "ok")
+        # 明细列出被丢弃的条目
+        self.assertIn("leftover.txt", msg)
         self.assertEqual(mirror.read_text(), "v0\n")
         self.assertFalse((wt / "leftover.txt").exists())
         self.assertEqual(gitops.status_porcelain(wt), [])

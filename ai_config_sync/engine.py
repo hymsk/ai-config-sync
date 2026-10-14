@@ -135,7 +135,11 @@ class Sync:
                 "sync: finalize {} pending mirror changes (host: {})".format(
                     len(mirror), socket.gethostname().split(".")[0]),
                 self.identity)
-        return "已按当前内容补提交残留镜像改动 {} 个".format(len(mirror))
+        add_set = set(add_paths)
+        return self._with_detail(
+            "已按当前内容补提交残留镜像改动 {} 个".format(len(mirror)),
+            [("+ " if p in add_set else "- ") + self._host_of(p)
+             for p in mirror])
 
     def _refresh_identity(self):
         """尽力读取配置中的提交身份；失败保持默认（主流程 _load 会严格报错）。"""
@@ -149,7 +153,27 @@ class Sync:
 
     @staticmethod
     def _join(prefix, msg):
-        return "{}；{}".format(prefix, msg) if prefix else msg
+        return "{}\n{}".format(prefix, msg) if prefix else msg
+
+    @staticmethod
+    def _host_of(repo_path):
+        """仓库相对路径 source/... 对应的主机绝对路径。"""
+        return "/" + repo_path[len("source/"):]
+
+    @staticmethod
+    def _lines(items, cap=30):
+        """缩进逐行明细；超过 cap 条截断；空列表返回空串。"""
+        if not items:
+            return ""
+        out = ["  " + str(i) for i in items[:cap]]
+        if len(items) > cap:
+            out.append("  …其余 {} 个从略".format(len(items) - cap))
+        return "\n".join(out)
+
+    @classmethod
+    def _with_detail(cls, base, items):
+        detail = cls._lines(items)
+        return base + "：\n" + detail if detail else base
 
     def _load(self, include_repo_only=True):
         """读取生效配置与受管清单，返回 (cfg, rules, managed)。
@@ -269,8 +293,11 @@ class Sync:
             gitops.commit(self.wt, message, self.identity)
         msg = self._join(
             finalize_msg,
-            "归档 {} 个文件，移除 {} 个（已本地提交）".format(
-                len(changed), len(removed)))
+            self._with_detail(
+                "归档 {} 个文件，移除 {} 个（已本地提交）".format(
+                    len(changed), len(removed)),
+                ["+ " + h for h in sorted(changed)] +
+                ["- " + self._host_of(rp) for rp in removed]))
         if unstable:
             msg += "，跳过 {} 个未稳定文件".format(len(unstable))
         return ("ok", msg)
@@ -316,7 +343,10 @@ class Sync:
             raise SyncError("error-transient", "推送失败: {}".format(exc))
         count = gitops.count_commits(self.wt, "{}..{}".format(origin, local))
         return ("ok", self._join(
-            finalize_msg, "已推送 {} 个提交".format(count)))
+            finalize_msg,
+            self._with_detail(
+                "已推送 {} 个提交".format(count),
+                gitops.log_oneline(self.wt, "{}..{}".format(origin, local)))))
 
     # ---------- sync：本地 config → 本机 ----------
 
@@ -324,7 +354,7 @@ class Sync:
         cfg, rules, managed = self._load(include_repo_only=True)
 
         run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        applied, skipped, same = 0, [], 0
+        applied, skipped, same, written = 0, [], 0, []
         for host_path in sorted(managed.files):
             repo_path = managed.files[host_path]
             blob = gitops.blob_at(self.wt, "HEAD", repo_path)
@@ -352,11 +382,14 @@ class Sync:
             applier.prune_backups(self.layout.backups_dir, repo_path,
                                   self.max_backups)
             applier.atomic_write(host, blob)
+            written.append(host_path)
             applied += 1
 
-        msg = "写回 {} 个文件（已一致 {}）".format(applied, same)
+        msg = self._with_detail(
+            "写回 {} 个文件（已一致 {}）".format(applied, same), written)
         if skipped:
-            msg += "，跳过 {} 个".format(len(skipped))
+            msg += "\n" + self._with_detail(
+                "跳过 {} 个".format(len(skipped)), skipped)
         return ("ok", msg)
 
     # ---------- pull：远端 → 本地 config ----------
@@ -392,7 +425,9 @@ class Sync:
             gitops.fast_forward(self.wt, self._remote_ref())
             count = gitops.count_commits(self.wt,
                                          "{}..{}".format(local, origin))
-            return ("ok", "已快进 {} 个提交".format(count))
+            return ("ok", self._with_detail(
+                "已快进 {} 个提交".format(count),
+                gitops.log_oneline(self.wt, "{}..{}".format(local, origin))))
         raise SyncError(
             "error-conflict",
             "本地与远端 {} 分叉，已保留现场；请在 {} 中手动处理后重试"
@@ -407,7 +442,7 @@ class Sync:
             for step in steps:
                 status, msg = getattr(self, self._STEPS[step])()
                 messages.append(msg)
-            return "ok", "；".join(messages)
+            return "ok", "\n".join(messages)
 
     def commit(self):
         return self.run(["commit"])
@@ -442,5 +477,6 @@ class Sync:
                 "error-dirty",
                 "部分改动无法丢弃（如嵌套 git 仓库），请手动处理: {}".format(
                     "; ".join(left[:5])))
-        return ("ok", "已丢弃 {} 处未提交改动，工作树已与 HEAD 一致".format(
-            len(dirty)))
+        return ("ok", self._with_detail(
+            "已丢弃 {} 处未提交改动，工作树已与 HEAD 一致".format(len(dirty)),
+            dirty))
