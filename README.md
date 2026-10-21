@@ -185,7 +185,20 @@ deliberately drops them, restoring HEAD as the truth.
 /root/.codeagent/AGENTS.md
 /root/.config/opencode/**
 !/root/.config/opencode/*.tmp
+
+# symlink declaration: /link/path -> /target
+# sync ensures the link exists and points at target (created/fixed on the host;
+# the link itself is never archived as a file)
+/root/.vimrc -> /root/dotfiles/vimrc
 ```
+
+Symlink rules: both sides must be absolute; no `!` and no wildcards; for the
+same link path the last declaration wins. A declared link path is excluded
+from file management (not archived by `commit`, not written back as a file by
+`sync`); a stale file mirror from before the declaration is removed by the
+next `commit`. The link path must not point into `.git`, the tool's own
+directories or the traversal-forbidden roots; the target's existence is not
+required (dangling links are legal) and its content is never read.
 
 ## Configuration
 
@@ -244,7 +257,9 @@ Data directories are preserved by default; note the working tree may contain unp
 - Multi-machine mirror semantics: `commit push` is the last pusher wins; `pull sync` first if you want to keep another machine's archived files.
 - Config files rewritten by their own application create archive feedback loops; do not include them.
 - All machines share one include list and one config; no per-machine variance.
-- Only regular files; symlinks are skipped with a warning.
+- Only regular files are archived; **undeclared** symlinks are skipped with a
+  warning. Symlinks can be managed declaratively via `/link -> /target` lines
+  in `sync.list` (see the syntax section).
 - No daemon, no merging of any kind, no crash-recovery journal, no conflict pause flag.
 - Credential files (tokens, private keys, API keys) are excluded by default and should not be included; the repository owner may explicitly authorize syncing them (a private repo is still not a credential vault — plaintext credentials enter Git history and are copied to every host that pulls).
 
@@ -255,7 +270,7 @@ python3 -m pip install -e .
 python3 -m unittest discover -s tests -t . -v
 ```
 
-Tests use a local bare repository as the remote and cover: include-list matching and hard exclusion, `commit` local archiving and mirror removal, `push` pushing and refusing a remote-ahead/diverged state, `sync` write-back with backup, `pull` fast-forward-only and divergence refusal, the `commit push` / `push sync` / `pull sync` combinations, rejection of abnormal combinations, missing-prefix errors, format-validation skips, symlink skipping, CRLF byte fidelity, installation branch rules (including `--force` orphan branches and attach default-branch resolution), auth-error boundaries, and backup pruning.
+Tests use a local bare repository as the remote and cover: include-list matching and hard exclusion, `commit` local archiving and mirror removal, `push` pushing and refusing a remote-ahead/diverged state, `sync` write-back with backup, `pull` fast-forward-only and divergence refusal, the `commit push` / `push sync` / `pull sync` combinations, rejection of abnormal combinations, missing-prefix errors, format-validation skips, undeclared-symlink skipping, symlink declarations (parsing, validation, creation/fixing on the host, occupied-path skips, stale-mirror cleanup), CRLF byte fidelity, installation branch rules (including `--force` orphan branches and attach default-branch resolution), auth-error boundaries, and backup pruning.
 
 ## License
 

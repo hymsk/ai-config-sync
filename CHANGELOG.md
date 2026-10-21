@@ -2,6 +2,12 @@
 
 Version history is kept newest first. The repository is a private baseline; no package has been published — releases are Git tags only.
 
+## 0.9.0
+
+### Added
+
+- **Declarative symlink management in `sync.list`.** A new line form `/link/path -> /target/path` declares a symlink to be managed on every host. `sync` ensures the declared links exist and point at the declared target: missing links are created (dangling links are legal), links pointing elsewhere are rebuilt with the previous target recorded to `state/backups/<run_id>/symlinks.log`, and a path occupied by a regular file or a directory is skipped with a warning (never overwritten or deleted). Both sides must be absolute; no `!` and no wildcards; for the same link path the last declaration wins. A declared link path is excluded from file management — it is never archived as a file by `commit`, and a stale file mirror from before the declaration is removed by the next `commit`. Link paths into `.git`, the tool's own directories or the traversal-forbidden roots are configuration errors. Because declarations live in `.sync-config/sync.list`, they reach every machine via `pull sync` like the rest of the include list.
+
 ## 0.8.0
 
 ### Added

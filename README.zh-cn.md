@@ -191,7 +191,17 @@ ai-config-sync clear        # 丢弃本地 config 工作树的全部未提交改
 /root/.codeagent/AGENTS.md
 /root/.config/opencode/**
 !/root/.config/opencode/*.tmp
+
+# 软链接声明：/link/path -> /target
+# sync 时在本机建立/修正链接；链接本身不作为文件归档
+/root/.vimrc -> /root/dotfiles/vimrc
 ```
+
+软链接声明规则：两侧均须绝对路径；不支持 `!` 与通配符；同一链接路径
+后声明胜出。声明的链接路径从文件管理中排除（`commit` 不为它造镜像，
+`sync` 不做文件写回）；声明之前已归档的旧文件镜像由下一次 `commit`
+作为镜像移除清理。链接路径不得指向 `.git`、工具自身目录或遍历禁区；
+目标不做存在性要求（允许悬空链接），也不读目标内容。
 
 ## 运行配置
 
@@ -246,7 +256,8 @@ bash deploy/uninstall.sh --purge-data
 - 多机镜像语义：`commit push` 最后推送者获胜；想保留他机归档的文件，先 `pull sync` 再 `commit push`。
 - 应用自身会重写的配置文件会造成归档回流，不要纳入清单。
 - 所有机器共用同一份清单与配置（无机器差异）。
-- 只处理普通文件；软链接跳过并告警。
+- 文件同步只处理普通文件；**未声明的**软链接跳过并告警。软链接可通过
+  `sync.list` 中的 `/link -> /target` 声明行管理（见语法节）。
 - 无常驻进程、无任何合并、无崩溃恢复 journal、无冲突暂停标记。
 - 凭据文件（token/私钥/API key 等）默认排除、不建议纳入；仓库所有者可显式授权同步
   （私有仓库不是凭据保险箱：明文凭据会进入 Git 历史并复制到每一个 pull sync 的主机）。
@@ -261,7 +272,8 @@ python3 -m unittest discover -s tests -t . -v
 测试使用本地 bare 仓库模拟远端，覆盖：清单匹配与硬排除、`commit` 本地归档与镜像移除、
 `push` 推送与远端领先/分叉拒绝、`sync` 写回与备份、`pull` 仅快进与分叉拒绝、
 组合 `commit push` / `push sync` / `pull sync`、异常组合拒绝、清单前缀缺失报错、
-格式校验跳过、软链接跳过、CRLF 字节保真、安装分支规则（含 `--force`
+格式校验跳过、未声明软链接跳过、软链接声明（解析/校验/建立/修正/占用跳过/
+镜像清理）、CRLF 字节保真、安装分支规则（含 `--force`
 孤儿分支与 attach 默认分支）、认证判定边界、备份修剪。
 
 ## 许可证

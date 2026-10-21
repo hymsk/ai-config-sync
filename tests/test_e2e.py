@@ -552,6 +552,98 @@ class E2E(unittest.TestCase):
         self.assertEqual(self._repo_blob("source" + str(f)), "real\n")
         self.assertFalse(self._remote_has("source" + str(link)))
 
+    # ---------- 软链接声明 ----------
+
+    def _declare_symlinks(self, decl_text):
+        wt = self.layout1.default_worktree
+        list_path = wt / ".sync-config" / "sync.list"
+        list_path.write_text("{}\n{}".format(self.host, decl_text),
+                             encoding="utf-8")
+        gitops.add(wt, [".sync-config/sync.list"])
+        gitops.commit(wt, "chore: declare symlinks", IDENT)
+
+    def test_sync_creates_declared_symlink(self):
+        target = host_file(self.host, "dot/real.txt", "real\n")
+        link = self.host / "link.conf"
+        self._declare_symlinks("{} -> {}\n".format(link, target))
+        status, msg = self.s1.run(["sync"])
+        self.assertEqual(status, "ok")
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(str(link)), str(target))
+        self.assertIn(str(link), msg)
+        # 再次 sync：链接已一致，不重建
+        status, msg = self.s1.run(["sync"])
+        self.assertEqual(status, "ok")
+        self.assertIn("一致", msg)
+
+    def test_sync_creates_dangling_symlink(self):
+        link = self.host / "dangling.conf"
+        self._declare_symlinks("{} -> /nonexistent/target\n".format(link))
+        status, _ = self.s1.run(["sync"])
+        self.assertEqual(status, "ok")
+        self.assertTrue(link.is_symlink())
+        self.assertFalse(link.exists())  # 悬空但链接存在
+
+    def test_sync_fixes_wrong_target_symlink(self):
+        target = host_file(self.host, "dot/real.txt", "real\n")
+        other = host_file(self.host, "dot/other.txt", "other\n")
+        link = self.host / "link.conf"
+        os.symlink(str(other), str(link))
+        self._declare_symlinks("{} -> {}\n".format(link, target))
+        status, msg = self.s1.run(["sync"])
+        self.assertEqual(status, "ok")
+        self.assertEqual(os.readlink(str(link)), str(target))
+        # 原指向已记录到备份日志
+        logs = list(self.layout1.backups_dir.rglob("symlinks.log"))
+        self.assertTrue(logs)
+        self.assertIn(str(other), logs[0].read_text(encoding="utf-8"))
+
+    def test_sync_skips_occupied_symlink_path(self):
+        occupied = host_file(self.host, "occupied.conf", "content\n")
+        self._declare_symlinks("{} -> /any/target\n".format(occupied))
+        status, msg = self.s1.run(["sync"])
+        self.assertEqual(status, "ok")
+        self.assertIn("跳过", msg)
+        self.assertFalse(occupied.is_symlink())
+        self.assertEqual(occupied.read_text(), "content\n")
+
+    def test_sync_declared_path_not_written_as_file(self):
+        # 声明为软链接的路径即使仓库里有旧文件镜像也不做文件写回
+        link = self.host / "link.txt"
+        self._manual_commit("source" + str(link), "old-file\n", "stale mirror")
+        target = host_file(self.host, "dot/real.txt", "real\n")
+        self._declare_symlinks("{} -> {}\n".format(link, target))
+        status, _ = self.s1.run(["sync"])
+        self.assertEqual(status, "ok")
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(str(link)), str(target))
+
+    def test_commit_removes_stale_mirror_of_declared_path(self):
+        link = self.host / "link.txt"
+        self._manual_commit("source" + str(link), "old-file\n", "stale mirror")
+        target = host_file(self.host, "dot/real.txt", "real\n")
+        self._declare_symlinks("{} -> {}\n".format(link, target))
+        status, msg = self.s1.run(["commit"])
+        self.assertEqual(status, "ok")
+        self.assertIn("移除 1", msg)
+        blob = gitops.blob_at(self.layout1.default_worktree, "HEAD",
+                              "source" + str(link))
+        self.assertIsNone(blob)
+
+    def test_pull_sync_distributes_declarations(self):
+        """声明随 .sync-config 经 pull sync 分发到另一台机器并生效。"""
+        target = host_file(self.host, "dot/real.txt", "real\n")
+        link = self.host / "link.conf"
+        self._declare_symlinks("{} -> {}\n".format(link, target))
+        self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        layout2, s2 = self._m2()
+        # 机器 2 上目标路径不同（无机器差异声明：同一路径），重建目标文件后验证
+        status, _ = s2.run(["pull", "sync"])
+        self.assertEqual(status, "ok")
+        link2 = Path(str(link))
+        self.assertTrue(link2.is_symlink())
+        self.assertEqual(os.readlink(str(link2)), str(target))
+
     def test_commit_push_crlf_byte_fidelity(self):
         old_global = os.environ.get("GIT_CONFIG_GLOBAL")
         cfg = self.root / "gitcfg"

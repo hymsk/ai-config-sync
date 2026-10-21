@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,61 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(sync_list.match_path(rules, "/a/x.md"))
         self.assertTrue(sync_list.match_path(rules, "/a/p/q/x.md"))
         self.assertFalse(sync_list.match_path(rules, "/a/p/y.md"))
+
+
+class SymlinkDeclTest(unittest.TestCase):
+    def test_decl_parsed_and_last_wins(self):
+        rules = sync_list.parse(
+            "/a/link -> /a/target1\n/a/link -> /a/target2\n")
+        decls = sync_list.symlink_decls(rules)
+        self.assertEqual(decls, {"/a/link": "/a/target2"})
+
+    def test_decl_not_matched_as_file_rule(self):
+        # 声明行不参与文件匹配
+        rules = sync_list.parse("/a/link -> /a/target\n")
+        self.assertFalse(sync_list.match_path(rules, "/a/link"))
+
+    def test_decl_must_be_absolute(self):
+        with self.assertRaises(sync_list.SyncListError):
+            sync_list.parse("link -> /a/target\n")
+        with self.assertRaises(sync_list.SyncListError):
+            sync_list.parse("/a/link -> target\n")
+
+    def test_decl_rejects_wildcards(self):
+        with self.assertRaises(sync_list.SyncListError):
+            sync_list.parse("/a/li*nk -> /a/target\n")
+
+    def test_decl_to_forbidden_root_rejected(self):
+        rules = sync_list.parse("/a/link -> /a/t\n")
+        decls = sync_list.symlink_decls(rules)
+        with self.assertRaises(sync_list.SyncListError):
+            sync_list.check_symlink_decls({"/proc/link": "/a/t"}, [])
+        with self.assertRaises(sync_list.SyncListError):
+            sync_list.check_symlink_decls({"/x/.git/link": "/a/t"}, [])
+        sync_list.check_symlink_decls(decls, [])  # 合法声明不抛错
+
+    def test_decl_in_hard_zone_rejected_at_expand(self):
+        zone = "/etc/ai-config-sync"
+        rules = sync_list.parse("{}/x -> /a/t\n".format(zone))
+        with self.assertRaises(sync_list.SyncListError):
+            sync_list.expand(rules, [zone])
+
+    def test_declared_path_excluded_from_files(self):
+        base = Path(tempfile.mkdtemp())
+        try:
+            target = base / "real.txt"
+            target.write_text("x")
+            link = base / "link.txt"
+            os.symlink(str(target), str(link))
+            rules = sync_list.parse(
+                "{b}/**\n{l} -> {t}\n".format(b=base, l=link, t=target))
+            exp = sync_list.expand(rules, [])
+            self.assertIn(str(target), exp.files)
+            self.assertNotIn(str(link), exp.files)
+        finally:
+            os.unlink(link)
+            import shutil
+            shutil.rmtree(base)
 
 
 class ExpandTest(unittest.TestCase):

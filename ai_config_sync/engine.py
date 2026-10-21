@@ -182,6 +182,7 @@ class Sync:
         include_repo_only=True 时并入"仓库有、本机无"的命中路径：
         - sync 用它重建本机缺失的文件；
         - commit 用它计算真镜像的移除集合。
+        软链接声明路径不属于文件受管集合（由 sync 建立链接，不归档内容）。
         """
         cfg_path = self.wt / ".sync-config" / "config.toml"
         list_path = self.wt / ".sync-config" / "sync.list"
@@ -207,12 +208,15 @@ class Sync:
             managed = sync_list.expand(rules, zones, log=self.log)
         except sync_list.SyncListError as exc:
             raise SyncError("error-config", str(exc), 2)
+        decls = sync_list.symlink_decls(rules)
         if include_repo_only:
             # 并入仓库侧受管路径（本机缺失时用于 sync 重建 / commit 移除）
             for repo_path in gitops.ls_tree(self.wt, "HEAD", "source"):
                 host_path = "/" + repo_path[len("source/"):]
                 if host_path in managed.files:
                     continue
+                if host_path in decls:
+                    continue  # 已声明为软链接：不按文件写回/移除
                 if os.path.exists(host_path):
                     continue
                 if sync_list.match_path(rules, host_path) and not sync_list.in_zones(
@@ -229,7 +233,7 @@ class Sync:
         """
         missing = []
         for rule in rules:
-            if rule.negated:
+            if rule.negated or rule.target is not None:
                 continue
             prefix = sync_list.literal_prefix(rule.pattern)
             if not os.path.exists(prefix):
@@ -252,6 +256,7 @@ class Sync:
         self._check_prefixes(rules)
         if gitops.head(self.wt) is None:
             raise SyncError("error-state", "工作树无提交")
+        decls = sync_list.symlink_decls(rules)
 
         # 真镜像收集：命中清单的本机文件集 = 仓库 source/ 的目标状态。
         changed = {}
@@ -269,9 +274,14 @@ class Sync:
             if blob is None or collector.sha256_bytes(blob) != digest:
                 changed[host_path] = (managed.files[host_path], data)
 
-        # 镜像移除：命中清单、但本机已不存在的受管路径从仓库移除。
+        # 镜像移除：命中清单、但本机已不存在的受管路径从仓库移除；
+        # 已声明为软链接的路径不再是受管文件，仓库中的旧镜像一并移除。
         removed = [rp for hp, rp in managed.files.items()
                    if not Path(hp).is_file()]
+        for repo_path in gitops.ls_tree(self.wt, "HEAD", "source"):
+            host_path = "/" + repo_path[len("source/"):]
+            if host_path in decls and host_path not in changed:
+                removed.append(repo_path)
         if not changed and not removed:
             if finalize_msg:
                 return ("ok", finalize_msg)
@@ -350,12 +360,61 @@ class Sync:
 
     # ---------- sync：本地 config → 本机 ----------
 
+    def _apply_symlinks(self, decls):
+        """按声明在本机建立/修正软链接，返回 (创建数, 明细, 跳过)。
+
+        - 已是指向声明目标的软链接 -> 跳过（一致）；
+        - 链接路径被普通文件/目录占用 -> 跳过并告警（不覆盖文件、不删除目录）；
+        - 指向其他目标的软链接 -> 备份后重建为声明目标；
+        - 目标不存在 -> 允许（悬空链接合法，指向的未来可能存在）。
+        """
+        created, detail, skipped = 0, [], []
+        for link, target in sorted(decls.items()):
+            path = Path(link)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.is_symlink():
+                current = os.readlink(str(path))
+                if current == target:
+                    continue
+                self._backup_symlink(path, target)
+                path.unlink()
+                os.symlink(target, str(path))
+                created += 1
+                detail.append("{} -> {}（已修正，原指向 {}）".format(
+                    link, target, current))
+                continue
+            if path.exists():
+                skipped.append("软链接路径被占用，跳过: {}（存在非链接文件）"
+                               .format(link))
+                continue
+            os.symlink(target, str(path))
+            created += 1
+            detail.append("{} -> {}".format(link, target))
+        return created, detail, skipped
+
+    def _backup_symlink(self, link: Path, target: str):
+        """重建前把原链接的指向备份到 state/backups/<run_id>/symlinks.log。"""
+        try:
+            current = os.readlink(str(link))
+        except OSError:
+            return
+        if current == target:
+            return
+        run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        log = self.layout.backups_dir / run_id / "symlinks.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write("{} -> {}（重建为 -> {}）\n".format(link, current, target))
+
     def _step_sync(self):
         cfg, rules, managed = self._load(include_repo_only=True)
+        decls = sync_list.symlink_decls(rules)
 
         run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         applied, skipped, same, written = 0, [], 0, []
         for host_path in sorted(managed.files):
+            if host_path in decls:
+                continue  # 声明为软链接的路径：不做文件写回
             repo_path = managed.files[host_path]
             blob = gitops.blob_at(self.wt, "HEAD", repo_path)
             if blob is None:
@@ -385,8 +444,20 @@ class Sync:
             written.append(host_path)
             applied += 1
 
-        msg = self._with_detail(
-            "写回 {} 个文件（已一致 {}）".format(applied, same), written)
+        parts = []
+        if decls:
+            n, detail, sym_skip = self._apply_symlinks(decls)
+            base = "建立/修正软链接 {} 个（一致 {}）".format(
+                n, len(decls) - n - len(sym_skip))
+            sym_msg = self._with_detail(base, detail)
+            if sym_skip:
+                sym_msg += "\n" + self._with_detail(
+                    "软链接跳过 {} 个".format(len(sym_skip)), sym_skip)
+            parts.append(sym_msg)
+            skipped.extend(sym_skip)
+        parts.append(self._with_detail(
+            "写回 {} 个文件（已一致 {}）".format(applied, same), written))
+        msg = "\n".join(parts)
         if skipped:
             msg += "\n" + self._with_detail(
                 "跳过 {} 个".format(len(skipped)), skipped)

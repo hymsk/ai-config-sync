@@ -17,10 +17,13 @@ SYNC_LIST = """\
 # sync.list：纳入清单（默认不管理任何文件）
 # 语法：普通行=纳入  !开头=排除  后规则胜出  支持 * 与 **
 # 仅支持绝对路径；目录递归写 /path/to/dir/**
+# 软链接声明：/link/path -> /target/path（sync 时在本机建立/修正链接；
+# 不归档链接内容，链接路径不能被其他规则当文件管理）
 # 示例：
 # /root/.codeagent/AGENTS.md
 # /root/.config/opencode/**
 # !/root/.config/opencode/*.tmp
+# /root/.vimrc -> /root/dotfiles/vimrc
 """
 
 GITATTRIBUTES = (
