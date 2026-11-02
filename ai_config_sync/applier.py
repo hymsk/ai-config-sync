@@ -115,10 +115,12 @@ def atomic_write(path: Path, data: bytes):
     if old_stat is not None:
         try:
             os.chown(str(tmp), old_stat.st_uid, old_stat.st_gid)
-        except (PermissionError, OSError):
-            pass
+        except (NotImplementedError, PermissionError, OSError):
+            pass  # Windows 无 chown / 无特权：保留属主不可用，内容照写
     os.replace(str(tmp), str(path))
     try:
+        if os.name == "nt":
+            return  # Windows 无目录 fsync，接受弱化的持久性保证
         dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
         try:
             os.fsync(dir_fd)

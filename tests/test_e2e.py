@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ai_config_sync import gitops, installer
 from ai_config_sync.config import load_bootstrap
@@ -694,6 +695,105 @@ class E2E(unittest.TestCase):
         layout, _ = self._m2()
         boot = load_bootstrap(layout)
         self.assertEqual(boot.branch, "main")
+
+
+class E2EPathMap(unittest.TestCase):
+    """path_map 端到端：Linux 风格 home 与 Git Bash 风格 home 共用 ~ 清单。
+
+    用注入式伪 home 模拟两类机器（/root 与 C:/Users/<n>），验证同一份
+    "~" = "__user_home__" 默认映射把两边归档到同一 source/__user_home__/ 布局。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.remote = make_bare(self.root)
+        self.linux_home = self.root / "linuxhome"    # 模拟 /root
+        self.gitbash_home = self.root / "ghome"      # 模拟 C:/Users/<n>
+        self.linux_home.mkdir()
+        self.gitbash_home.mkdir()
+
+        self.layout1 = make_layout(self.root, "m1")
+        installer.install_new(self.layout1, str(self.remote), branch="main",
+                              log=silent)
+        list_path = (self.layout1.default_worktree / ".sync-config"
+                     / "sync.list")
+        list_path.write_text("~/.config/**\n", encoding="utf-8")
+        gitops.add(self.layout1.default_worktree,
+                   [".sync-config/sync.list"])
+        gitops.commit(self.layout1.default_worktree,
+                      "chore: shared ~ list", IDENT)
+        gitops.push(self.layout1.default_worktree, "main")
+        self.s1 = Sync(boot_for(self.layout1, self.remote), self.layout1,
+                       log=silent)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _home(self, path):
+        return mock.patch("ai_config_sync.pathmap.home_dir",
+                          return_value=str(path))
+
+    def _remote_show(self, repo_path):
+        import shutil
+        clone = self.root / "pm-inspect"
+        if clone.exists():
+            shutil.rmtree(clone)
+        git(["clone", str(self.remote), str(clone)])
+        return git(["show", "origin/main:" + repo_path], cwd=clone)
+
+    def _remote_has(self, repo_path):
+        import shutil
+        clone = self.root / "pm-inspect"
+        if clone.exists():
+            shutil.rmtree(clone)
+        git(["clone", str(self.remote), str(clone)])
+        rc = git(["ls-tree", "-r", "--name-only", "origin/main"], cwd=clone)
+        return repo_path in rc.splitlines()
+
+    def test_commit_archives_gitbash_home_to_source_root(self):
+        host_file(self.gitbash_home, ".config/app.conf", "v1\n")
+        with self._home(self.gitbash_home):
+            status, _ = self.s1.run(["commit", "push"])
+        self.assertEqual(status, "ok")
+        self.assertEqual(
+            self._remote_show(
+                "source/__user_home__/.config/app.conf"), "v1\n")
+
+    def test_tilde_list_shared_between_machines(self):
+        # m1（Linux 风格 home）归档
+        host_file(self.linux_home, ".config/app.conf", "from-linux\n")
+        with self._home(self.linux_home):
+            self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+
+        # m2（Git Bash 风格 home）attach + pull sync：重建到自己的 home 下
+        layout2 = make_layout(self.root, "m2")
+        installer.install_attach(layout2, str(self.remote), log=silent)
+        s2 = Sync(boot_for(layout2, self.remote), layout2, log=silent)
+        with self._home(self.gitbash_home):
+            status, _ = s2.run(["pull", "sync"])
+        self.assertEqual(status, "ok")
+        target = self.gitbash_home / ".config" / "app.conf"
+        self.assertEqual(target.read_text(), "from-linux\n")
+
+        # m2 修改后归档：更新的是同一 repo 路径（共用 source/__user_home__/ 布局）
+        target.write_text("from-gitbash\n", encoding="utf-8")
+        with self._home(self.gitbash_home):
+            self.assertEqual(s2.run(["commit", "push"])[0], "ok")
+        self.assertEqual(
+            self._remote_show("source/__user_home__/.config/app.conf"),
+            "from-gitbash\n")
+
+    def test_mirror_removal_uses_mapped_path(self):
+        f = host_file(self.linux_home, ".config/app.conf", "v\n")
+        with self._home(self.linux_home):
+            self.assertEqual(self.s1.run(["commit", "push"])[0], "ok")
+        f.unlink()
+        with self._home(self.linux_home):
+            status, _ = self.s1.run(["commit", "push"])
+        self.assertEqual(status, "ok")
+        self.assertFalse(self._remote_has(
+            "source/__user_home__/.config/app.conf"))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,9 @@ import os
 import re
 from dataclasses import dataclass
 
+from .pathmap import PathMap, PathMapError, expand_tilde, normalize
+from .pathmap import _is_absolute
+
 # 不允许展开遍历的根（含自身及子树）
 FORBIDDEN_ROOTS = ("/", "/proc", "/sys", "/dev", "/run")
 
@@ -76,9 +79,13 @@ def parse(text: str):
             s = s[1:].strip()
         if not s:
             raise SyncListError("sync.list 第 {} 行: 空规则".format(lineno))
-        if not s.startswith("/"):
+        # ~/ 前缀展开为本机 home（多机共用清单的关键：Linux root 与
+        # Git Bash 各自展开为 /root 与 C:/Users/<name>）
+        s = normalize(expand_tilde(s))
+        if not _is_absolute(s):
             raise SyncListError(
-                "sync.list 第 {} 行: 仅支持绝对路径规则: {}".format(lineno, s))
+                "sync.list 第 {} 行: 仅支持绝对路径或 ~/ 前缀规则: {}".format(
+                    lineno, s))
         if s == "/":
             raise SyncListError(
                 "sync.list 第 {} 行: 不允许遍历根目录 /".format(lineno))
@@ -92,16 +99,19 @@ def parse(text: str):
 
 
 def _parse_symlink_decl(s: str, lineno: int):
-    """解析软链接声明行；行内不含 -> 或格式非法时返回 None / 抛错。"""
+    """解析软链接声明行；行内不含 -> 或格式非法时返回 None / 抛错。
+
+    链接与目标均支持 ~ 前缀（展开为本机 home 后建立链接）。
+    """
     left, sep, right = s.partition("->")
     if not sep:
         return None
-    link = left.strip()
-    target = right.strip()
-    if not link.startswith("/") or not target.startswith("/"):
+    link = normalize(expand_tilde(left.strip()))
+    target = normalize(expand_tilde(right.strip()))
+    if not _is_absolute(link) or not _is_absolute(target):
         raise SyncListError(
-            "sync.list 第 {} 行: 软链接声明的链接与目标均须为绝对路径: {}"
-            .format(lineno, s))
+            "sync.list 第 {} 行: 软链接声明的链接与目标均须为绝对路径"
+            "（或 ~/ 前缀）: {}".format(lineno, s))
     if "*" in link or "?" in link or "**" in link:
         raise SyncListError(
             "sync.list 第 {} 行: 软链接声明不支持通配符: {}".format(lineno, s))
@@ -160,12 +170,17 @@ def in_zones(path: str, hard_zones) -> bool:
 
 
 class Expanded:
-    def __init__(self):
+    def __init__(self, path_map=None):
+        self.path_map = path_map or PathMap()
         self.files = {}      # host 绝对路径 -> 仓库相对路径 source/...
         self.warnings = []
 
     def add(self, host_path: str):
-        self.files[host_path] = "source" + host_path
+        host_path = normalize(host_path)
+        try:
+            self.files[host_path] = self.path_map.to_repo(host_path)
+        except PathMapError as exc:
+            raise SyncListError("sync.list: {}".format(exc))
 
 
 def _walk(prefix: str, hard_zones, warn):
@@ -173,7 +188,7 @@ def _walk(prefix: str, hard_zones, warn):
     for dirpath, dirnames, filenames in os.walk(prefix, followlinks=False):
         keep = []
         for d in dirnames:
-            full = os.path.join(dirpath, d)
+            full = normalize(os.path.join(dirpath, d))
             if d == ".git":
                 continue
             if in_zones(full, hard_zones):
@@ -184,20 +199,22 @@ def _walk(prefix: str, hard_zones, warn):
             keep.append(d)
         dirnames[:] = keep
         for f in filenames:
-            candidates.append(os.path.join(dirpath, f))
+            candidates.append(normalize(os.path.join(dirpath, f)))
     return candidates
 
 
-def expand(rules, hard_zones, log=None):
+def expand(rules, hard_zones, log=None, path_map=None):
     """展开清单为受管普通文件集合。
 
     - 规则字面前缀落在硬排除区或遍历禁区 -> SyncListError（配置错误）；
     - 宽规则展开时命中的硬排除子树 -> 剔除并告警；
     - 只收普通文件；软链接与非常规文件跳过并告警；
     - 软链接声明行不参与展开：声明的链接路径从文件集合排除
-      （由 sync 在本机建立/修正软链接，不当文件归档）。
+      （由 sync 在本机建立/修正软链接，不当文件归档）；
+    - host -> source/ 路径转换走 path_map（默认 {"~": "root"}）；
+      撞车（恒等结果落在映射值之下）-> SyncListError。
     """
-    exp = Expanded()
+    exp = Expanded(path_map)
     decls = symlink_decls(rules)
     check_symlink_decls(decls, hard_zones)
 

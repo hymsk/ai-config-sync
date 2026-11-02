@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ai_config_sync import sync_list
 
@@ -36,6 +37,38 @@ class ParseTest(unittest.TestCase):
         self.assertTrue(sync_list.match_path(rules, "/a/x.md"))
         self.assertTrue(sync_list.match_path(rules, "/a/p/q/x.md"))
         self.assertFalse(sync_list.match_path(rules, "/a/p/y.md"))
+
+
+class TildeRuleTest(unittest.TestCase):
+    """~/ 前缀规则：展开为本机 home（多机共用清单的关键）。"""
+
+    HOME = "/home/fake"
+
+    def _parse(self, text):
+        with mock.patch("ai_config_sync.pathmap.home_dir",
+                        return_value=self.HOME):
+            return sync_list.parse(text)
+
+    def test_tilde_rule_expands_to_home(self):
+        rules = self._parse("~/.config/**\n")
+        self.assertTrue(sync_list.match_path(rules, self.HOME + "/.config/x"))
+        self.assertFalse(sync_list.match_path(rules, "/root/.config/x"))
+
+    def test_negated_tilde_rule_expands(self):
+        rules = self._parse("~/**\n!~/*.tmp\n")
+        self.assertFalse(sync_list.match_path(rules, self.HOME + "/a.tmp"))
+        self.assertTrue(sync_list.match_path(rules, self.HOME + "/a.md"))
+
+    def test_tilde_user_form_rejected(self):
+        # ~user/x 不是 ~/ 前缀，也不支持
+        with self.assertRaises(sync_list.SyncListError):
+            self._parse("~other/x\n")
+
+    def test_symlink_decl_tilde_expands(self):
+        rules = self._parse("~/.vimrc -> ~/dotfiles/vimrc\n")
+        decls = sync_list.symlink_decls(rules)
+        self.assertEqual(decls, {
+            self.HOME + "/.vimrc": self.HOME + "/dotfiles/vimrc"})
 
 
 class SymlinkDeclTest(unittest.TestCase):
@@ -126,6 +159,32 @@ class ExpandTest(unittest.TestCase):
         self.assertNotIn(str(self.tree / "link.md"), files)  # 软链接跳过
         self.assertEqual(exp.files[str(self.tree / "a.md")],
                          "source" + str(self.tree / "a.md"))
+
+    def test_expand_with_path_map_archives_home_to_source_root(self):
+        # 注入伪 Git Bash home：归档落 source/__user_home__/ 下
+        home = self.base / "ghome"
+        home.mkdir()
+        (home / ".config").mkdir()
+        (home / ".config" / "app.conf").write_text("x")
+        with mock.patch("ai_config_sync.pathmap.home_dir",
+                        return_value=str(home)):
+            rules = sync_list.parse("~/.config/**\n")
+            exp = sync_list.expand(rules, [])
+        host = str(home / ".config" / "app.conf")
+        self.assertIn(host, exp.files)
+        self.assertEqual(exp.files[host],
+                         "source/__user_home__/.config/app.conf")
+
+    def test_expand_rejects_collision_with_mapped_value(self):
+        # 伪 Git Bash home 下，未命中映射键的 /__user_home__/x 恒等归档到
+        # source/__user_home__/x，与映射值 __user_home__ 撞车 -> 配置错误
+        home = self.base / "ghome"
+        home.mkdir()
+        with mock.patch("ai_config_sync.pathmap.home_dir",
+                        return_value=str(home)):
+            exp = sync_list.Expanded()
+        with self.assertRaises(sync_list.SyncListError):
+            exp.add("/__user_home__/x")
 
     def test_rule_targeting_hard_zone_rejected(self):
         rules = sync_list.parse("{z}/**\n".format(z=self.zone))

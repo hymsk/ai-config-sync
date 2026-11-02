@@ -1,11 +1,13 @@
 """单元与回归测试：认证判定、备份修剪、配置解析。"""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from ai_config_sync import applier, gitops
-from ai_config_sync.config import parse_repo_config, ConfigError
+from ai_config_sync import applier, cli, gitops, pathmap
+from ai_config_sync.config import Layout, parse_repo_config, ConfigError
 
 
 def silent(*_args):
@@ -113,6 +115,81 @@ class RepoConfigTest(unittest.TestCase):
         # interval/remote_check_interval 已随常驻模式移除，不再读取
         cfg = parse_repo_config("interval = 5\nremote_check_interval = 5\n")
         self.assertEqual(cfg.max_backups_per_file, 20)
+
+    def test_repo_config_default_path_map(self):
+        # 未写 [path_map] 节：默认 {"~": "__user_home__"}，键展开为本机 home
+        cfg = parse_repo_config("max_backups_per_file = 1\n")
+        self.assertEqual(cfg.path_map.entries,
+                         {pathmap.home_dir(): "__user_home__"})
+
+    def test_repo_config_explicit_path_map(self):
+        cfg = parse_repo_config(
+            '[path_map]\n"~" = "root"\n"/d/work" = "work"\n')
+        self.assertEqual(cfg.path_map.entries,
+                         {pathmap.home_dir(): "root", "/d/work": "work"})
+
+    def test_repo_config_rejects_duplicate_map_value(self):
+        with self.assertRaises(ConfigError):
+            parse_repo_config(
+                '[path_map]\n"~" = "root"\n"/home/u" = "root"\n')
+
+    def test_repo_config_rejects_non_table_path_map(self):
+        with self.assertRaises(ConfigError):
+            parse_repo_config('path_map = "root"\n')
+
+
+class LayoutEnvTest(unittest.TestCase):
+    """工具目录默认值：环境变量覆盖 > 平台默认（构造时解析，非导入时）。"""
+
+    def test_env_overrides_defaults(self):
+        base = Path(tempfile.mkdtemp())
+        try:
+            env = {"AI_CONFIG_SYNC_ETC": str(base / "e"),
+                   "AI_CONFIG_SYNC_VAR": str(base / "v")}
+            with mock.patch.dict(os.environ, env):
+                layout = Layout()
+            self.assertEqual(layout.etc, base / "e")
+            self.assertEqual(layout.var, base / "v")
+        finally:
+            import shutil
+            shutil.rmtree(base)
+
+    def test_defaults_resolve_without_env(self):
+        with mock.patch.dict(os.environ, {},
+                             clear=False):
+            os.environ.pop("AI_CONFIG_SYNC_ETC", None)
+            os.environ.pop("AI_CONFIG_SYNC_VAR", None)
+            layout = Layout()
+        if os.name == "nt":
+            base = Path(os.environ.get("LOCALAPPDATA") or "~")
+            self.assertEqual(layout.etc,
+                             Path(base) / "ai-config-sync" / "etc")
+        else:
+            self.assertEqual(layout.etc, Path("/etc/ai-config-sync"))
+            self.assertEqual(layout.var, Path("/var/lib/ai-config-sync"))
+
+
+class SetupLogPermTest(unittest.TestCase):
+    """工具目录不可创建时给出环境变量指引并以退出码 2 终止。"""
+
+    def test_unwritable_state_dir_reports_hint(self):
+        import contextlib
+        import io
+        base = Path(tempfile.mkdtemp())
+        try:
+            # state 路径被普通文件占用 -> mkdir 抛 OSError
+            (base / "var" / "state").parent.mkdir(parents=True)
+            (base / "var" / "state").write_text("occupied")
+            layout = Layout(etc=base / "etc", var=base / "var")
+            err = io.StringIO()
+            with mock.patch("sys.stderr", err):
+                with self.assertRaises(SystemExit) as cm:
+                    cli._setup_log(layout)
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("AI_CONFIG_SYNC_ETC", err.getvalue())
+        finally:
+            import shutil
+            shutil.rmtree(base)
 
 
 class StepCombinationTest(unittest.TestCase):

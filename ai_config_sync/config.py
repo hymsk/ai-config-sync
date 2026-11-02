@@ -5,9 +5,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import tomlite
+from .pathmap import PathMap, PathMapError
 
-DEFAULT_ETC = Path("/etc/ai-config-sync")
-DEFAULT_VAR = Path("/var/lib/ai-config-sync")
+
+def _default_etc() -> Path:
+    """工具配置目录：环境变量覆盖 > Windows 用户目录 > /etc/ai-config-sync。"""
+    env = os.environ.get("AI_CONFIG_SYNC_ETC")
+    if env:
+        return Path(env)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return Path(base) / "ai-config-sync" / "etc"
+    return Path("/etc/ai-config-sync")
+
+
+def _default_var() -> Path:
+    """工具数据目录：环境变量覆盖 > Windows 用户目录 > /var/lib/ai-config-sync。"""
+    env = os.environ.get("AI_CONFIG_SYNC_VAR")
+    if env:
+        return Path(env)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return Path(base) / "ai-config-sync" / "var"
+    return Path("/var/lib/ai-config-sync")
 
 
 class ConfigError(Exception):
@@ -16,14 +36,15 @@ class ConfigError(Exception):
 
 @dataclass
 class Layout:
-    """工具自身目录布局（固定绝对路径；可注入以便隔离测试）。"""
+    """工具自身目录布局（默认按环境变量/平台解析；可注入以便隔离测试）。"""
 
-    etc: Path = DEFAULT_ETC
-    var: Path = DEFAULT_VAR
+    etc: Path = None
+    var: Path = None
 
     def __post_init__(self):
-        self.etc = Path(self.etc)
-        self.var = Path(self.var)
+        # 缺省在构造时解析（而非模块导入时），保证同进程内环境变量变化生效
+        self.etc = Path(self.etc) if self.etc is not None else _default_etc()
+        self.var = Path(self.var) if self.var is not None else _default_var()
 
     @property
     def bootstrap(self) -> Path:
@@ -106,6 +127,11 @@ class RepoConfig:
     max_backups_per_file: int = 20
     git_name: str = "sync-bot"
     git_email: str = "sync-bot@invalid"
+    path_map: PathMap = None  # None 时 __post_init__ 取默认 {"~": "__user_home__"}
+
+    def __post_init__(self):
+        if self.path_map is None:
+            self.path_map = PathMap()
 
 
 def parse_repo_config(text: str) -> RepoConfig:
@@ -122,6 +148,14 @@ def parse_repo_config(text: str) -> RepoConfig:
             cfg.max_backups_per_file = int(data["max_backups_per_file"])
     except (TypeError, ValueError):
         raise ConfigError("config.toml: max_backups_per_file 必须为整数")
+    if "path_map" in data:
+        raw_map = data["path_map"]
+        if not isinstance(raw_map, dict):
+            raise ConfigError("config.toml: [path_map] 须为表")
+        try:
+            cfg.path_map = PathMap(raw_map)
+        except PathMapError as exc:
+            raise ConfigError("config.toml: {}".format(exc))
     cfg.git_name = str(git.get("name", cfg.git_name))
     cfg.git_email = str(git.get("email", cfg.git_email))
     if cfg.max_backups_per_file < 0:

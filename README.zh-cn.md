@@ -1,6 +1,6 @@
 # ai-config-sync
 
-> 通过专用 Git 仓库，在 Linux 主机之间单向归档与还原配置文件。
+> 通过专用 Git 仓库，在多台主机（Linux / Windows Git Bash）之间单向归档与还原配置文件。
 
 一个规则驱动的命令行工具，提供四个原子操作与三个固定组合，无常驻进程、
 无自动双向收敛、**不做任何合并**。每个原子步骤只做一件事：
@@ -36,23 +36,39 @@
 | `ai-config-sync`（本仓库） | 工具程序、种子模板 |
 | 配置仓库（如 `ai-config-stor`） | `.sync-config/`（运行配置与纳入清单）+ `source/`（受管文件镜像） |
 
-配置仓库中 `source/` 下的路径与主机绝对路径一一对应：
+配置仓库中 `source/` 下的路径与主机绝对路径一一对应（经 `[path_map]` 映射，
+见[配置](#配置)）：
 
 ```text
-主机 /root/.config/opencode/AGENTS.md
-  <-> source/root/.config/opencode/AGENTS.md
+Linux   主机 /root/.config/opencode/AGENTS.md
+  <-> source/__user_home__/.config/opencode/AGENTS.md
+GitBash 主机 C:/Users/<name>/.config/opencode/AGENTS.md
+  <-> source/__user_home__/.config/opencode/AGENTS.md   # 默认 "~" = "__user_home__" 映射
 ```
 
 部署后运行配置以配置仓库的 `.sync-config/config.toml` 与 `sync.list` 为准；
 本仓库的种子模板只在 `install new` 时使用，运行期绝不回退。
 
-## 目录布局（固定绝对路径；root 运行）
+## 目录布局（绝对路径；普通用户 / Windows 可重定向）
 
 ```text
 /etc/ai-config-sync/bootstrap.toml   # 安装器生成：repo_url / branch / worktree
 /var/lib/ai-config-sync/repo         # 配置仓库本地 clone（工作树，-p 可改）
 /var/lib/ai-config-sync/state/       # backups/ / sync.log / lock
 ```
+
+Windows（Git Bash + 原生 Python）下默认落 `%LOCALAPPDATA%\ai-config-sync\`；
+Linux 普通用户（无 root 权限写 `/etc`、`/var/lib`）同样用环境变量重定向：
+
+```bash
+export AI_CONFIG_SYNC_ETC="$HOME/.config/ai-config-sync"
+export AI_CONFIG_SYNC_VAR="$HOME/.local/share/ai-config-sync"
+```
+
+工具目录不可写时启动即报错并给出上述指引（退出码 2）。
+
+home 映射与登录身份无关：root 的 `/root`、普通用户的 `/home/<u>`、
+Git Bash 的 `C:/Users/<n>` 经默认 `"~" = "__user_home__"` 均归档到 `source/__user_home__/`。
 
 工具自身目录被硬排除，任何清单规则都不能把工具自己归档出去。
 
@@ -187,19 +203,21 @@ ai-config-sync clear        # 丢弃本地 config 工作树的全部未提交改
 
 ```gitignore
 # 默认不管理任何文件；普通行=纳入，!=排除，后规则胜出
-# 仅支持绝对路径；** 跨目录段；目录递归写 /path/dir/**
-/root/.codeagent/AGENTS.md
-/root/.config/opencode/**
-!/root/.config/opencode/*.tmp
+# 路径须为绝对路径或 ~/ 前缀；** 跨目录段；目录递归写 /path/dir/**
+# ~/ 在每台机器上展开为本机 home（Linux root=/root，Git Bash=C:/Users/<n>）；
+# 多机共用清单请统一用 ~/ 写法
+~/.codeagent/AGENTS.md
+~/.config/opencode/**
+!~/.config/opencode/*.tmp
 
-# 软链接声明：/link/path -> /target
+# 软链接声明：/link/path -> /target（两侧也支持 ~/ 前缀）
 # sync 时在本机建立/修正链接；链接本身不作为文件归档
-/root/.vimrc -> /root/dotfiles/vimrc
+~/.vimrc -> ~/dotfiles/vimrc
 ```
 
-软链接声明规则：两侧均须绝对路径；不支持 `!` 与通配符；同一链接路径
-后声明胜出。声明的链接路径从文件管理中排除（`commit` 不为它造镜像，
-`sync` 不做文件写回）；声明之前已归档的旧文件镜像由下一次 `commit`
+软链接声明规则：两侧均须绝对路径（或 `~/` 前缀）；不支持 `!` 与通配符；
+同一链接路径后声明胜出。声明的链接路径从文件管理中排除（`commit` 不为它
+造镜像，`sync` 不做文件写回）；声明之前已归档的旧文件镜像由下一次 `commit`
 作为镜像移除清理。链接路径不得指向 `.git`、工具自身目录或遍历禁区；
 目标不做存在性要求（允许悬空链接），也不读目标内容。
 
@@ -213,7 +231,25 @@ max_backups_per_file = 20     # sync 写回前每个文件保留的历史备份�
 [git]
 name = "sync-bot"
 email = "sync-bot@invalid"
+
+# 主机路径前缀 -> source/ 下目录；最长前缀匹配，按路径段边界
+# "~" 每台机器展开为本机 home；省略整节即下方默认值
+[path_map]
+"~" = "__user_home__"
 ```
+
+`[path_map]` 让 Linux 与 Windows Git Bash 共用同一仓库布局：Linux 的
+`/root/x` 与 Git Bash 的 `C:/Users/<n>/x` 都归档到 `source/__user_home__/x`。
+值名 `__user_home__` 不与自然路径撞车，多机布局一眼可辨。默认
+`{"~": "__user_home__"}` 下未命中映射的路径保持恒等
+（`/etc/x ↔ source/etc/x`）。键须为 `~`/`~/xxx` 或绝对路径；值须为
+`source/` 下相对目录。未命中任何键、但归档位置会落在某映射值之下的路径
+（如 Git Bash 上清单误写 `/root/x`）按配置错误拒绝，避免同一仓库路径
+出现两个本机来源互踩。
+
+> 旧布局迁移：`0.9.0` 之前 home 文件按恒等映射存于 `source/root/`。
+> 保持旧布局就在 `[path_map]` 写 `"~" = "root"`；切换到新默认则把仓库中
+> `source/root/` 移动为 `source/__user_home__/`。
 
 ## 冲突处理
 
@@ -255,9 +291,13 @@ bash deploy/uninstall.sh --purge-data
   `push` 不重算主机文件、`sync` 不联网：`push sync` 才是"以本地 git 为准"。
 - 多机镜像语义：`commit push` 最后推送者获胜；想保留他机归档的文件，先 `pull sync` 再 `commit push`。
 - 应用自身会重写的配置文件会造成归档回流，不要纳入清单。
-- 所有机器共用同一份清单与配置（无机器差异）。
+- 所有机器共用同一份清单与配置（无机器差异）；路径差异由 `[path_map]`
+  归一（清单用 `~/` 写法），不做盘符自动探测（`C:\` ↔ `/c/` 互转）。
 - 文件同步只处理普通文件；**未声明的**软链接跳过并告警。软链接可通过
   `sync.list` 中的 `/link -> /target` 声明行管理（见语法节）。
+  Windows 无特权建链失败时跳过并告警，不中断 sync。
+- Windows 原生 Python 下无 `chown` 与目录 `fsync`，相应步骤静默跳过
+  （内容照写，持久性与属主保留弱化）。
 - 无常驻进程、无任何合并、无崩溃恢复 journal、无冲突暂停标记。
 - 凭据文件（token/私钥/API key 等）默认排除、不建议纳入；仓库所有者可显式授权同步
   （私有仓库不是凭据保险箱：明文凭据会进入 Git 历史并复制到每一个 pull sync 的主机）。

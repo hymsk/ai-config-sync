@@ -81,7 +81,13 @@ def _pad(text, width):
 
 
 def _setup_log(layout: Layout):
-    layout.state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        layout.state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print("工具目录不可用: {}（{}）；无 root 权限时请设置 "
+              "AI_CONFIG_SYNC_ETC / AI_CONFIG_SYNC_VAR 环境变量指向可写目录"
+              .format(layout.state_dir, exc), file=sys.stderr)
+        raise SystemExit(2)
     logger = logging.getLogger("ai-config-sync")
     if not logger.handlers:
         logger.setLevel(logging.INFO)
@@ -220,7 +226,7 @@ def main(argv=None):
                                           branch=args.branch,
                                           worktree=args.place,
                                           log=logger.info)
-        except (installer.InstallError, gitops.GitError) as exc:
+        except (installer.InstallError, gitops.GitError, OSError) as exc:
             print("安装失败: {}".format(exc), file=sys.stderr)
             return 1
         print("下一步：编辑 .sync-config/sync.list，然后执行 "

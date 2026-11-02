@@ -30,13 +30,21 @@
 
 ## 2. 范围
 
-- 仅支持 Linux；以 root 运行，目录布局为固定绝对路径。
+- 支持 Linux 与 Windows Git Bash（Windows 原生 Python + Git for
+  Windows；锁用 `msvcrt` 等价实现，路径统一正斜杠）。home 映射按"当前用户
+  home"语义工作，与登录身份无关：root=`/root`，普通用户=`/home/<u>`，
+  Git Bash=`C:/Users/<n>`，均映射到 `source/__user_home__/`。工具目录默认为固定
+  绝对路径（`/etc`、`/var/lib`，需 root 权限）；无 root 权限或 Windows 下
+  用 `AI_CONFIG_SYNC_ETC` / `AI_CONFIG_SYNC_VAR` 重定向（Windows 默认落
+  `%LOCALAPPDATA%\ai-config-sync\`，目录不可用时给出指引并退出码 2）。
 - 文件同步只处理**普通文件**；未声明的软链接与非常规文件跳过并告警。
 - **软链接声明式管理**：`sync.list` 中 `/link/path -> /target` 声明的链接
   不归档内容，由 `sync` 在本机建立/修正（见第 5 节与第 9 节）。
 - 删除**单向传播**：`push` 把"本机已删的受管文件"从仓库移除（真镜像）；
   `pull` **永不删除**本机文件（仓库没有的路径本机保留）。
-- 所有机器共用同一分支、同一清单与同一配置；无机器差异。
+- 所有机器共用同一分支、同一清单与同一配置；无机器差异。主机路径经
+  `[path_map]` 映射到统一仓库布局（见第 6 节）：清单用 `~/` 前缀书写，
+  Linux `/root/x` 与 Git Bash `C:/Users/<n>/x` 均归档到 `source/__user_home__/x`。
 - 每次操作都是单向的：`commit`/`push` 只写仓库、`sync` 只写本机、`pull` 只写本地 config，
   不做双向收敛、不做任何三方合并。
 - 凭据文件（token、私钥、API key 等）默认排除，**不建议**纳入；经仓库所有者显式授权后可纳入清单（例如 `/root/.codex/auth.json`、`/root/.config/api-keys`）。放行意味着明文凭据进入 Git 历史并复制到**每一个**同步节点：私有仓库不等于安全，授权前应自行评估并准备轮换 token。
@@ -48,11 +56,16 @@
 | `ai-config-sync`（本仓库） | 工具程序、种子模板 |
 | 配置仓库（如 `ai-config-stor`） | `.sync-config/`（运行配置与清单）+ `source/`（受管文件镜像） |
 
-`source/` 下路径与主机绝对路径一一对应：`/root/.config/opencode/AGENTS.md`
-↔ `source/root/.config/opencode/AGENTS.md`。部署后运行配置以配置仓库的
-`.sync-config/` 为准；本仓库种子模板只在 `install new` 时使用，运行期绝不回退。
+`source/` 下路径与主机绝对路径一一对应（经 `[path_map]` 映射，见第 6 节）：
+`/root/.config/opencode/AGENTS.md` ↔ `source/__user_home__/.config/opencode/AGENTS.md`；
+Windows Git Bash 的 `C:/Users/<n>/.config/opencode/AGENTS.md` 经默认映射
+`"~" = "__user_home__"` 同样归档到 `source/__user_home__/.config/opencode/AGENTS.md`。
+部署后运行配置以配置仓库的 `.sync-config/` 为准；本仓库种子模板只在
+`install new` 时使用，运行期绝不回退。
 
-工具自身目录布局（`-p` 可改工作树位置）：
+工具自身目录布局（`-p` 可改工作树位置；Linux 默认固定路径需 root，
+普通用户与 Windows 用 `AI_CONFIG_SYNC_ETC` / `AI_CONFIG_SYNC_VAR` 重定向，
+Windows 默认落 `%LOCALAPPDATA%\ai-config-sync\`）：
 
 ```text
 /etc/ai-config-sync/bootstrap.toml   # 安装器生成：repo_url / branch / worktree / install_dir
@@ -76,11 +89,13 @@
 
 语法类 .gitignore 但**默认不管理任何文件**：
 
-- 仅支持绝对路径；普通行 = 纳入，`!` 开头 = 排除，后规则胜出。
+- 仅支持绝对路径或 `~/` 前缀（`~` 与 `~/xxx` 在本机解析时展开为 home 目录）；
+  普通行 = 纳入，`!` 开头 = 排除，后规则胜出。多机共用清单应统一用 `~/` 写法：
+  Linux root 上展开为 `/root`，Git Bash 上展开为 `C:/Users/<n>`。
 - `*` 不跨 `/`；`**` 跨目录段；末段字面量按目录语义匹配整个子树。
 - **软链接声明行** `/link/path -> /target`：声明式管理软链接本身。
-  - 链接与目标均须为绝对路径；不支持 `!` 与通配符；同一链接路径
-    后声明胜出（覆盖前面的声明）。
+  - 链接与目标均须为绝对路径（或 `~/` 前缀，展开为本机 home）；
+    不支持 `!` 与通配符；同一链接路径后声明胜出（覆盖前面的声明）。
   - 声明的链接路径**从文件受管集合排除**：不当文件归档（commit 不为它
     造镜像），也不做文件写回（sync 直接跳过文件路径）；此前已归档的
     旧文件镜像由 `commit` 作为镜像移除清理。
@@ -101,8 +116,25 @@
 |---|---|---|
 | `max_backups_per_file` | 20 | `pull` 写回前每个文件保留的历史备份份数；0 = 不清理，不得为负 |
 | `[git] name` / `email` | `sync-bot` / `sync-bot@invalid` | 归档提交身份 |
+| `[path_map]` | `{"~": "__user_home__"}` | 主机路径前缀 → `source/` 下目录（见下） |
 
-任一字段非法即操作失败（`error-config`）；配置缺失同样失败，不猜测。
+`[path_map]` 语义：
+
+- 键：`~` / `~/xxx`（每台机器运行时展开为本机 home）或任意绝对路径前缀；
+  值：`source/` 下相对目录（非空、不以 `/` 开头、无 `..` 与通配符）。
+- 主机路径 → 仓库路径按**最长前缀、路径段边界**匹配（`/root` 不匹配
+  `/rootdir`）；未命中任何键的路径保持恒等（`/etc/x` ↔ `source/etc/x`）。
+- 默认 `{"~": "__user_home__"}`：home 路径显式走映射（Linux root 的
+  `/root/x` 归档到 `source/__user_home__/x`，不再与恒等布局重合）；
+  值名 `__user_home__` 不与自然路径撞车，多机布局一眼可辨。
+  Git Bash 的 home 经同一映射落到 `source/__user_home__/`，与 Linux 共用仓库布局。
+- **旧布局迁移**（`0.9.0` 之前 home 文件按恒等映射存于 `source/root/`）：
+  在 `[path_map]` 写 `"~" = "root"` 保持旧布局，或在仓库中把
+  `source/root/` 移动为 `source/__user_home__/` 后按默认映射继续。
+- 逆映射用于 sync 写回、仓库侧路径重建与镜像移除明细。
+- **撞车拒绝**：未命中任何键、但恒等归档位置落在某映射值之下的路径
+  → `error-config` 配置错误，避免同一仓库路径出现两个本机来源互相覆盖。
+- 任一字段非法即操作失败（`error-config`）；配置缺失同样失败，不猜测。
 
 > 兼容字段 `interval` / `remote_check_interval` 已随常驻模式一并移除，不再读取。
 
@@ -189,6 +221,8 @@
 - 指向其他目标的软链接 → 把原指向记录到
   `state/backups/<run_id>/symlinks.log` 后重建为声明目标；
 - 链接路径被普通文件或目录占用 → **跳过并告警**，不覆盖文件、不删除目录；
+- 建链失败（Windows 无特权 / 文件系统不支持）→ **跳过并告警**；
+  修正指向场景失败时尽力恢复原指向；
 - 父目录不存在时自动创建。
 
 ## 10. pull（远端 → 本地 config）
@@ -227,7 +261,8 @@
   不做任何隐式暂存；`commit`/`push` 开始时把 `source/` 镜像残留按工作树
   当前内容补提交；`pull` 要求工作树干净（未知改动或未了结的镜像残留
   → error-dirty）。
-- `commit`/`push`/`sync`/`pull` 的一次调用（含组合）全程持有 `state/lock` 独占 flock；
+- `commit`/`push`/`sync`/`pull` 的一次调用（含组合）全程持有 `state/lock` 独占 flock
+  （Windows 用 `msvcrt.locking` 等价实现，占用同样抛出并退出码 3）；
   第二个实例立即失败，退出码 3。
 
 ## 12. update（自更新）
@@ -267,12 +302,16 @@
 ## 15. 已知边界与非目标
 
 - 应用自身会重写的配置文件会造成归档回流，不要纳入清单。
-- 不处理文件权限/属主的差异同步（仅写回时保留原值）。
+- 不处理文件权限/属主的差异同步（仅写回时保留原值；Windows 无
+  `chown`/目录 `fsync`，相应步骤静默跳过）。
 - 不做多机调度、不感知其他主机的在线状态；每一步都由人工显式触发。
 - 多机镜像语义：`commit push` 是"本机受管文件的全量镜像"，最后推送者的内容胜出。
   他机归档、而本机没有的文件，会被镜像移除；想保留请先 `pull sync` 再 `commit push`。
 - `sync` 不感知远端、`pull` 不感知主机文件：`pull sync` 才是"以远端为准"的完整写回；
   `push` 不重算主机文件、`sync` 不联网：`push sync` 才是"以本地 git 为准"。
+- 不做盘符自动探测（`C:\` ↔ `/c/` 互转）：Git Bash 调 Windows 原生 Python 时
+  `expanduser("~")` 已返回 `C:/Users/<n>`，直接使用；路径映射按字节比较、
+  大小写敏感（清单路径应与实际大小写一致）。
 - 不提供自动双向收敛、常驻守护、崩溃恢复 journal 与冲突暂停标记。
 - 默认不在配置仓库中保存凭据；经仓库所有者显式授权后，可将凭据文件纳入清单同步（风险与轮换责任由所有者承担，见第 2 节）。
 
@@ -285,6 +324,8 @@
   组合 `commit push` / `push sync` / `pull sync`、异常组合拒绝、
   清单前缀缺失报错、格式校验跳过、未声明软链接跳过、软链接声明（解析/校验/
   建立/修正/占用跳过/镜像清理）、CRLF 字节保真、
+  path_map 路径映射（默认恒等、`~` 展开、段边界、撞车拒绝、跨机共用清单、
+  仓库侧路径重建）、
   clear 丢弃全部未提交改动与干净幂等、输出明细（文件路径与提交清单及截断）、
   安装分支规则（含 `--force` 孤儿分支与 attach 默认分支）、
   认证判定边界、备份修剪、update 的 tag 解析/快进/分叉保护/非 git 安装。

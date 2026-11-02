@@ -17,7 +17,6 @@ commit/push 开始时把上次 commit 中断残留在 source/ 的镜像改动按
 当前内容补提交（中断自恢复，无需人工善后）；其余未知改动 error-dirty 交人工。
 """
 
-import fcntl
 import os
 import socket
 import time
@@ -25,6 +24,13 @@ from pathlib import Path
 
 from . import applier, collector, gitops, sync_list
 from .config import Bootstrap, ConfigError, Layout, parse_repo_config
+from .pathmap import PathMap
+
+try:
+    import fcntl
+except ImportError:  # Windows 原生 Python：用 msvcrt.locking 等价替代
+    fcntl = None
+    import msvcrt
 
 
 class SyncError(Exception):
@@ -52,6 +58,7 @@ class Sync:
         self.branch = boot.branch
         self.identity = ("sync-bot", "sync-bot@invalid")
         self.max_backups = 20
+        self.path_map = PathMap()  # 默认 {"~": "__user_home__"}；_load 时按配置严格重建
         self.log = log or (lambda msg: None)
         layout.state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -60,14 +67,40 @@ class Sync:
     def _lock(self):
         path = self.layout.lock_path
 
+        def _try_lock(fd):
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            try:
+                fd.seek(0)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise BlockingIOError(*exc.args) from exc
+
+        def _unlock(fd):
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            else:
+                try:
+                    fd.seek(0)
+                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+
         class _L:
             def __enter__(self):
                 self.fd = open(path, "a+")
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    _try_lock(self.fd)
+                except Exception:
+                    self.fd.close()
+                    raise
 
             def __exit__(self, *args):
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
-                self.fd.close()
+                try:
+                    _unlock(self.fd)
+                finally:
+                    self.fd.close()
 
         return _L()
 
@@ -142,12 +175,13 @@ class Sync:
              for p in mirror])
 
     def _refresh_identity(self):
-        """尽力读取配置中的提交身份；失败保持默认（主流程 _load 会严格报错）。"""
+        """尽力读取配置中的提交身份与路径映射；失败保持默认（主流程 _load 会严格报错）。"""
         try:
             cfg = parse_repo_config(
                 (self.wt / ".sync-config" / "config.toml").read_text(
                     encoding="utf-8"))
             self.identity = (cfg.git_name, cfg.git_email)
+            self.path_map = cfg.path_map
         except (OSError, ConfigError):
             pass
 
@@ -155,10 +189,9 @@ class Sync:
     def _join(prefix, msg):
         return "{}\n{}".format(prefix, msg) if prefix else msg
 
-    @staticmethod
-    def _host_of(repo_path):
-        """仓库相对路径 source/... 对应的主机绝对路径。"""
-        return "/" + repo_path[len("source/"):]
+    def _host_of(self, repo_path):
+        """仓库相对路径 source/... 对应的主机绝对路径（按 path_map 逆映射）。"""
+        return self.path_map.to_host(repo_path)
 
     @staticmethod
     def _lines(items, cap=30):
@@ -194,6 +227,7 @@ class Sync:
             raise SyncError("error-config", str(exc), 2)
         self.identity = (cfg.git_name, cfg.git_email)
         self.max_backups = cfg.max_backups_per_file
+        self.path_map = cfg.path_map
         try:
             list_text = list_path.read_text(encoding="utf-8")
         except OSError:
@@ -205,14 +239,15 @@ class Sync:
         zones = [str(z) for z in
                  self.layout.hard_zones(self.wt, self.boot.install_dir)]
         try:
-            managed = sync_list.expand(rules, zones, log=self.log)
+            managed = sync_list.expand(rules, zones, log=self.log,
+                                       path_map=self.path_map)
         except sync_list.SyncListError as exc:
             raise SyncError("error-config", str(exc), 2)
         decls = sync_list.symlink_decls(rules)
         if include_repo_only:
             # 并入仓库侧受管路径（本机缺失时用于 sync 重建 / commit 移除）
             for repo_path in gitops.ls_tree(self.wt, "HEAD", "source"):
-                host_path = "/" + repo_path[len("source/"):]
+                host_path = self.path_map.to_host(repo_path)
                 if host_path in managed.files:
                     continue
                 if host_path in decls:
@@ -279,7 +314,7 @@ class Sync:
         removed = [rp for hp, rp in managed.files.items()
                    if not Path(hp).is_file()]
         for repo_path in gitops.ls_tree(self.wt, "HEAD", "source"):
-            host_path = "/" + repo_path[len("source/"):]
+            host_path = self.path_map.to_host(repo_path)
             if host_path in decls and host_path not in changed:
                 removed.append(repo_path)
         if not changed and not removed:
@@ -360,13 +395,31 @@ class Sync:
 
     # ---------- sync：本地 config → 本机 ----------
 
+    @staticmethod
+    def _symlink(path: Path, target: str, rollback=None):
+        """建立软链接；失败（如 Windows 无特权/文件系统不支持）返回异常。
+
+        rollback 非 None 时（修正指向场景）失败先尽力恢复原指向。
+        """
+        try:
+            os.symlink(target, str(path))
+            return None
+        except OSError as exc:
+            if rollback is not None:
+                try:
+                    os.symlink(rollback, str(path))
+                except OSError:
+                    pass
+            return exc
+
     def _apply_symlinks(self, decls):
         """按声明在本机建立/修正软链接，返回 (创建数, 明细, 跳过)。
 
         - 已是指向声明目标的软链接 -> 跳过（一致）；
         - 链接路径被普通文件/目录占用 -> 跳过并告警（不覆盖文件、不删除目录）；
         - 指向其他目标的软链接 -> 备份后重建为声明目标；
-        - 目标不存在 -> 允许（悬空链接合法，指向的未来可能存在）。
+        - 目标不存在 -> 允许（悬空链接合法，指向的未来可能存在）；
+        - 建链失败（Windows 无特权等）-> 跳过并告警，重建场景尽力恢复原指向。
         """
         created, detail, skipped = 0, [], []
         for link, target in sorted(decls.items()):
@@ -378,7 +431,11 @@ class Sync:
                     continue
                 self._backup_symlink(path, target)
                 path.unlink()
-                os.symlink(target, str(path))
+                exc = self._symlink(path, target, rollback=current)
+                if exc is not None:
+                    skipped.append("重建软链接失败: {} -> {}（{}）".format(
+                        link, target, exc))
+                    continue
                 created += 1
                 detail.append("{} -> {}（已修正，原指向 {}）".format(
                     link, target, current))
@@ -387,7 +444,11 @@ class Sync:
                 skipped.append("软链接路径被占用，跳过: {}（存在非链接文件）"
                                .format(link))
                 continue
-            os.symlink(target, str(path))
+            exc = self._symlink(path, target)
+            if exc is not None:
+                skipped.append("建立软链接失败: {} -> {}（{}）".format(
+                    link, target, exc))
+                continue
             created += 1
             detail.append("{} -> {}".format(link, target))
         return created, detail, skipped
